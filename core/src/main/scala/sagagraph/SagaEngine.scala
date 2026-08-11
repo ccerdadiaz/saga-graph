@@ -7,7 +7,7 @@ package sagagraph
 //   1. Execute each element in order (Single or Parallel)
 //   2. Register compensation in WAL BEFORE executing action
 //   3. On failure: compensate in reverse order (LIFO)
-//   4. Respect step semantics (Mandatory / Optional / BestEffort)
+//   4. Respect step type (Mandatory / Optional / BestEffort)
 // ---------------------------------------------------------------------------
 object SagaEngine:
 
@@ -16,7 +16,7 @@ object SagaEngine:
 
   private def execute(
     remaining: List[SagaElement],
-    wal:       List[SagaLogEntry]
+    wal:       List[WalEntry]
   ): SagaResult =
     remaining match
       case Nil =>
@@ -24,16 +24,16 @@ object SagaEngine:
 
       case head :: tail =>
         head match
-          case SagaElement.Single(node) =>
-            runNode(node, wal) match
+          case SagaElement.Single(step) =>
+            runStep(step, wal) match
               case Right(updatedWal) =>
                 execute(tail, updatedWal)
               case Left((error, updatedWal)) =>
                 compensate(updatedWal)
                 SagaResult.Failed(error)
 
-          case SagaElement.Parallel(fork) =>
-            runFork(fork, wal) match
+          case SagaElement.Parallel(steps) =>
+            runParallel(steps, wal) match
               case Right(updatedWal) =>
                 execute(tail, updatedWal)
               case Left((error, updatedWal)) =>
@@ -41,63 +41,69 @@ object SagaEngine:
                 SagaResult.Failed(error)
 
   // -------------------------------------------------------------------------
-  // Execute a single node — WAL before action
+  // Execute a single step — dispatch by type
   // -------------------------------------------------------------------------
-  private def runNode(
-    node: SagaNode,
-    wal:  List[SagaLogEntry]
-  ): Either[(Throwable, List[SagaLogEntry]), List[SagaLogEntry]] =
+  private def runStep(
+    step: SagaStep,
+    wal:  List[WalEntry]
+  ): Either[(Throwable, List[WalEntry]), List[WalEntry]] =
+    step match
+      case s: BestEffortStep =>
+        s.run()  // ignore result completely
+        Right(wal)
 
-    val entry = SagaLogEntry(node.name, node.semantics, node.compensate)
+      case s: OptionalStep =>
+        val entry      = walEntry(s.name, s.compensate, None, None)
+        val updatedWal = entry :: wal
+        s.run() // failure recorded in wal but saga continues
+        Right(updatedWal)
 
-    node.semantics match
-      case StepSemantics.BestEffort =>
-        node.run()  // ignore result completely
-        Right(wal)  // WAL not updated — nothing to compensate
-
-      case StepSemantics.Optional =>
-        val updatedWal = entry :: wal  // WAL before action
-        node.run() match
-          case Right(_)  => Right(updatedWal)
-          case Left(err) => Right(updatedWal)  // failure recorded but saga continues
-
-      case StepSemantics.Mandatory =>
-        val updatedWal = entry :: wal  // WAL before action
-        node.run() match
+      case s: MandatoryStep =>
+        val entry      = walEntry(s.name, s.compensate,
+                           Some(s.compensationRef),
+                           Some(s.compensationArgs))
+        val updatedWal = entry :: wal
+        s.run() match
           case Right(_)  => Right(updatedWal)
           case Left(err) => Left((err, updatedWal))
 
   // -------------------------------------------------------------------------
-  // Execute a parallel fork — all-or-nothing
+  // Execute parallel steps — all-or-nothing
   // All compensations registered before any action runs
   // -------------------------------------------------------------------------
-  private def runFork(
-    fork: SagaFork,
-    wal:  List[SagaLogEntry]
-  ): Either[(Throwable, List[SagaLogEntry]), List[SagaLogEntry]] =
+  private def runParallel(
+    steps: List[MandatoryStep],
+    wal:   List[WalEntry]
+  ): Either[(Throwable, List[WalEntry]), List[WalEntry]] =
 
     // Register ALL compensations in WAL before executing any action
-    val forkWal = fork.nodes.map(n =>
-      SagaLogEntry(n.name, n.semantics, n.compensate)
+    val forkWal = steps.map(s =>
+      walEntry(s.name, s.compensate,
+        Some(s.compensationRef),
+        Some(s.compensationArgs))
     ) ++ wal
 
-    // Execute all nodes — collect results
-    val results = fork.nodes.map(n => (n, n.run()))
+    // Execute all steps — collect results
+    val results = steps.map(s => (s.name, s.run()))
 
     // Check for failures
-    results.collectFirst { case (n, Left(err)) => (n, err) } match
-      case Some((_, err)) =>
-        Left((err, forkWal))  // any failure → compensate all
-      case None =>
-        Right(forkWal)        // all succeeded
+    results.collectFirst { case (name, Left(err)) => err } match
+      case Some(err) => Left((err, forkWal))
+      case None      => Right(forkWal)
 
   // -------------------------------------------------------------------------
   // Compensate in LIFO order
   // -------------------------------------------------------------------------
-  private def compensate(wal: List[SagaLogEntry]): Unit =
-    wal.foreach: entry =>
-      entry.semantics match
-        case StepSemantics.BestEffort =>
-          ()  // never compensate bestEffort
-        case _ =>
-          entry.compensate() // ignore compensation errors for now
+  private def compensate(wal: List[WalEntry]): Unit =
+    wal.foreach(_.compensate())
+
+  // -------------------------------------------------------------------------
+  // Build a WAL entry
+  // -------------------------------------------------------------------------
+  private def walEntry(
+    name:    String,
+    comp:    () => Either[Throwable, Unit],
+    ref:     Option[String],
+    args:    Option[String]
+  ): WalEntry =
+    WalEntry(name, comp, ref, args)

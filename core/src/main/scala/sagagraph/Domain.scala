@@ -10,34 +10,45 @@ object SagaId:
   extension (s: SagaId) def value: String = s
 
 // ---------------------------------------------------------------------------
-// Step semantics — controls compensation behavior on failure
+// SagaStep hierarchy — each type enforces its own contract at compile time
+//
+// MandatoryStep — failure compensates the entire graph
+// OptionalStep  — failure recorded, saga continues
+// BestEffortStep — failure silently ignored, no compensation
 // ---------------------------------------------------------------------------
-enum StepSemantics:
-  case Mandatory   // failure compensates the entire graph
-  case Optional    // failure recorded, saga continues
-  case BestEffort  // failure silently ignored
+sealed trait SagaStep:
+  def name: String
+  def run:  () => Either[Throwable, Unit]
+
+case class MandatoryStep(
+  name:             String,
+  run:              () => Either[Throwable, Unit],
+  compensate:       () => Either[Throwable, Unit],
+  compensationRef:  String,
+  compensationArgs: String
+) extends SagaStep
+
+case class OptionalStep(
+  name:             String,
+  run:              () => Either[Throwable, Unit],
+  compensate:       () => Either[Throwable, Unit],
+  compensationRef:  String,
+  compensationArgs: String
+) extends SagaStep
+
+case class BestEffortStep(
+  name: String,
+  run:  () => Either[Throwable, Unit]
+) extends SagaStep
 
 // ---------------------------------------------------------------------------
-// A graph node — pre-applied functions, no type parameter exposed
-// ---------------------------------------------------------------------------
-case class SagaNode(
-  name:       String,
-  semantics:  StepSemantics,
-  run:        () => Either[Throwable, Unit],
-  compensate: () => Either[Throwable, Unit]
-)
-
-// ---------------------------------------------------------------------------
-// Fork — parallel nodes with all-or-nothing semantics
-// ---------------------------------------------------------------------------
-case class SagaFork(nodes: List[SagaNode])
-
-// ---------------------------------------------------------------------------
-// Graph element — either a single node or a parallel fork
+// Graph element — single step or parallel fork
+// Note: parallel fork only accepts MandatoryStep — all-or-nothing semantics
+// require compensation to be defined for every branch
 // ---------------------------------------------------------------------------
 enum SagaElement:
-  case Single(node: SagaNode)
-  case Parallel(fork: SagaFork)
+  case Single(step: SagaStep)
+  case Parallel(steps: List[MandatoryStep])
 
 // ---------------------------------------------------------------------------
 // Saga execution status
@@ -50,10 +61,18 @@ enum SagaStatus:
   case Failed(cause: Throwable)
 
 // ---------------------------------------------------------------------------
-// WAL entry — compensation already captured in closure
+// WAL entry — compensation captured in closure + serializable reference
 // ---------------------------------------------------------------------------
-case class SagaLogEntry(
-  stepName:   String,
-  semantics:  StepSemantics,
-  compensate: () => Either[Throwable, Unit]
+case class WalEntry(
+  stepName:         String,
+  compensate:       () => Either[Throwable, Unit],
+  compensationRef:  Option[String],
+  compensationArgs: Option[String],
+  status:           WalEntry.Status = WalEntry.Status.Pending
 )
+
+object WalEntry:
+  enum Status:
+    case Pending
+    case Compensated
+    case CompensationFailed
