@@ -3,40 +3,40 @@ package sagagraph
 class SagaGraph private (elements: List[SagaElement]):
 
   def step(
-    name:            String,
-    action:          () => Either[Throwable, Unit],
-    compensate:      () => Either[Throwable, Unit],
-    ref:             String    = "",
-    args:            CompArgs  = CompArgs.empty
+      name: String,
+      action: () => Either[Throwable, Unit],
+      compensate: () => Either[Throwable, Unit],
+      ref: String = "",
+      args: CompArgs = CompArgs.empty
   ): SagaGraph =
     val node = MandatoryStep(
-      name             = name,
-      run              = action,
-      compensate       = compensate,
-      compensationRef  = ref,
+      name = name,
+      run = action,
+      compensate = compensate,
+      compensationRef = ref,
       compensationArgs = args.toJson
     )
     SagaGraph(elements :+ SagaElement.Single(node))
 
   def optional(
-    name:       String,
-    action:     () => Either[Throwable, Unit],
-    compensate: () => Either[Throwable, Unit],
-    ref:        String   = "",
-    args:       CompArgs = CompArgs.empty
+      name: String,
+      action: () => Either[Throwable, Unit],
+      compensate: () => Either[Throwable, Unit],
+      ref: String = "",
+      args: CompArgs = CompArgs.empty
   ): SagaGraph =
     val node = OptionalStep(
-      name             = name,
-      run              = action,
-      compensate       = compensate,
-      compensationRef  = ref,
+      name = name,
+      run = action,
+      compensate = compensate,
+      compensationRef = ref,
       compensationArgs = args.toJson
     )
     SagaGraph(elements :+ SagaElement.Single(node))
 
   def bestEffort(
-    name:   String,
-    action: () => Either[Throwable, Unit]
+      name: String,
+      action: () => Either[Throwable, Unit]
   ): SagaGraph =
     val node = BestEffortStep(name = name, run = action)
     SagaGraph(elements :+ SagaElement.Single(node))
@@ -44,18 +44,19 @@ class SagaGraph private (elements: List[SagaElement]):
   def parallel(nodes: SagaGraph.ParNode*): SagaGraph =
     val forkNodes = nodes.toList.map(p =>
       MandatoryStep(
-        name             = p.name,
-        run              = p.action,
-        compensate       = p.compensate,
-        compensationRef  = p.ref,
+        name = p.name,
+        run = p.action,
+        compensate = p.compensate,
+        compensationRef = p.ref,
         compensationArgs = p.args.toJson
       )
     )
     SagaGraph(elements :+ SagaElement.Parallel(forkNodes))
 
-  def run(): SagaResult =
-    SagaEngine.run(elements)
-
+  def run(store: WalStore = InMemoryWalStore()): SagaResult =
+    val sagaId = SagaId.generate()
+    val engine = SagaEngine(sagaId, store)
+    engine.run(elements)
 
 object SagaGraph:
 
@@ -63,17 +64,17 @@ object SagaGraph:
     new SagaGraph(elements)
 
   case class ParNode(
-    name:      String,
-    action:    () => Either[Throwable, Unit],
-    compensate: () => Either[Throwable, Unit],
-    ref:       String   = "",
-    args:      CompArgs = CompArgs.empty
+      name: String,
+      action: () => Either[Throwable, Unit],
+      compensate: () => Either[Throwable, Unit],
+      ref: String = "",
+      args: CompArgs = CompArgs.empty
   )
 
   def par(
-    name:       String,
-    action:     () => Either[Throwable, Unit],
-    compensate: () => Either[Throwable, Unit],
-    ref:        String   = "",
-    args:       CompArgs = CompArgs.empty
+      name: String,
+      action: () => Either[Throwable, Unit],
+      compensate: () => Either[Throwable, Unit],
+      ref: String = "",
+      args: CompArgs = CompArgs.empty
   ): ParNode = ParNode(name, action, compensate, ref, args)
