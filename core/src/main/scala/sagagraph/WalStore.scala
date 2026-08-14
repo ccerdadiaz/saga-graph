@@ -35,3 +35,15 @@ trait WalStore:
 
   // Mark saga as compensated by zombie recovery
   def markCompensated(sagaId: SagaId): Either[Throwable, Unit]
+
+  // Mark a WAL entry as failed — no compensation needed, service guarantees clean state
+  def markActionFailed(
+      sagaId: SagaId,
+      stepName: String
+  ): Either[Throwable, Unit]
+
+  // Get the current status of a WAL entry
+  def getStatus(
+      sagaId: SagaId,
+      stepName: String
+  ): Either[Throwable, WalEntry.Status]

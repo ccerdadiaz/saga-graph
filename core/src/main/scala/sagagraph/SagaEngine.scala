@@ -20,7 +20,7 @@ class SagaEngine(sagaId: SagaId, store: WalStore):
   // -------------------------------------------------------------------------
   private def execute(
       remaining: List[SagaElement],
-      wal:       List[WalEntry]
+      wal: List[WalEntry]
   ): SagaResult =
     remaining match
       case Nil =>
@@ -48,25 +48,35 @@ class SagaEngine(sagaId: SagaId, store: WalStore):
   // -------------------------------------------------------------------------
   private def runStep(
       step: SagaStep,
-      wal:  List[WalEntry]
+      wal: List[WalEntry]
   ): Either[(Throwable, List[WalEntry]), List[WalEntry]] =
     step match
 
       case s: BestEffortStep =>
-        s.run()   // failure silently ignored, no WAL entry
+        s.run() // failure silently ignored, no WAL entry
         Right(wal)
 
       case s: OptionalStep =>
-        val entry      = WalEntry(s.name, s.compensate, Some(s.compensationRef), Some(s.compensationArgs))
+        val entry = WalEntry(
+          s.name,
+          s.compensate,
+          Some(s.compensationRef),
+          Some(s.compensationArgs)
+        )
         val updatedWal = entry :: wal
-        store.append(sagaId, entry)   // WAL before action
-        s.run()                       // failure recorded but saga continues
+        store.append(sagaId, entry) // WAL before action
+        s.run() // failure recorded but saga continues
         Right(updatedWal)
 
       case s: MandatoryStep =>
-        val entry      = WalEntry(s.name, s.compensate, Some(s.compensationRef), Some(s.compensationArgs))
+        val entry = WalEntry(
+          s.name,
+          s.compensate,
+          Some(s.compensationRef),
+          Some(s.compensationArgs)
+        )
         val updatedWal = entry :: wal
-        store.append(sagaId, entry)   // WAL before action — invariant
+        store.append(sagaId, entry) // WAL before action — invariant
         s.run() match
           case Right(_)  => Right(updatedWal)
           case Left(err) => Left((err, updatedWal))
@@ -77,35 +87,54 @@ class SagaEngine(sagaId: SagaId, store: WalStore):
   // -------------------------------------------------------------------------
   private def runParallel(
       steps: List[MandatoryStep],
-      wal:   List[WalEntry]
+      wal: List[WalEntry]
   ): Either[(Throwable, List[WalEntry]), List[WalEntry]] =
 
-    // Build all entries first
     val entries = steps.map(s =>
-      WalEntry(s.name, s.compensate, Some(s.compensationRef), Some(s.compensationArgs))
+      WalEntry(
+        s.name,
+        s.compensate,
+        Some(s.compensationRef),
+        Some(s.compensationArgs)
+      )
     )
-
-    // Persist ALL to WAL before any action — parallel WAL invariant
     entries.foreach(store.append(sagaId, _))
-    val forkWal = entries.reverse ++ wal   // LIFO: last registered = first compensated
+    val forkWal = entries.reverse ++ wal
 
-    // Execute all steps — collect results
     val results = steps.map(s => s.name -> s.run())
 
     results.collectFirst { case (_, Left(err)) => err } match
-      case Some(err) => Left((err, forkWal))
       case None      => Right(forkWal)
+      case Some(err) =>
+        // Mark failed actions — no compensation needed for them
+        results.foreach {
+          case (name, Left(_))  => store.markActionFailed(sagaId, name)
+          case (name, Right(_)) => () // succeeded — will be compensated
+        }
+        Left((err, forkWal))
 
   // -------------------------------------------------------------------------
   // Compensate in LIFO order — mark each step after successful compensation
   // -------------------------------------------------------------------------
   private def compensate(wal: List[WalEntry]): Unit =
     wal.foreach { entry =>
-      entry.compensate() match
+      store.getStatus(sagaId, entry.stepName) match
+        case Left(_) =>
+          // Cannot determine status — compensate defensively
+          runCompensation(entry)
+        case Right(WalEntry.Status.ActionFailed) =>
+          // Action failed — service guarantees clean state, nothing to compensate
+          ()
         case Right(_) =>
-          store.markCompensated(sagaId, entry.stepName)
-        case Left(err) =>
-          // Compensation failed — logged, saga continues compensating others
-          // CompensationFailed status remains in store for zombie recovery
-          println(s"[WARN] Compensation failed for '${entry.stepName}': ${err.getMessage}")
+          runCompensation(entry)
     }
+
+  private def runCompensation(entry: WalEntry): Unit =
+    entry.compensate() match
+      case Right(_) =>
+        store.markCompensated(sagaId, entry.stepName)
+      case Left(err) =>
+        store.markCompensationFailed(sagaId, entry.stepName)
+        println(
+          s"[WARN] Compensation failed for '${entry.stepName}': ${err.getMessage}"
+        )

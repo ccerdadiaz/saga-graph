@@ -163,3 +163,37 @@ class SqliteWalStore(dbPath: String) extends WalStore:
       ps.close()
       Right(())
     catch case e: Throwable => Left(e)
+
+  def markActionFailed(
+      sagaId: SagaId,
+      stepName: String
+  ): Either[Throwable, Unit] =
+    updateEntryStatus(sagaId, stepName, "ActionFailed")
+
+  def getStatus(
+      sagaId: SagaId,
+      stepName: String
+  ): Either[Throwable, WalEntry.Status] =
+    try
+      val sql = """
+      SELECT status FROM wal_entries
+      WHERE  saga_id = ? AND step_name = ?
+    """
+      val ps = conn.prepareStatement(sql)
+      ps.setString(1, sagaId.value)
+      ps.setString(2, stepName)
+      val rs = ps.executeQuery()
+      val result =
+        if rs.next() then
+          rs.getString("status") match
+            case "Pending"      => Right(WalEntry.Status.Pending)
+            case "ActionFailed" => Right(WalEntry.Status.ActionFailed)
+            case "Compensated"  => Right(WalEntry.Status.Compensated)
+            case "CompensationFailed" =>
+              Right(WalEntry.Status.CompensationFailed)
+            case unknown => Left(Exception(s"Unknown status: $unknown"))
+        else Left(Exception(s"Step '$stepName' not found for saga $sagaId"))
+      rs.close()
+      ps.close()
+      result
+    catch case e: Throwable => Left(e)

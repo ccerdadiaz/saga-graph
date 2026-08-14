@@ -1,12 +1,12 @@
 val scala3Version = "3.4.2"
 
 ThisBuild / organization := "io.github.ccerdadiaz"
-ThisBuild / version      := "0.1.0-SNAPSHOT"
+ThisBuild / version := "0.1.0-SNAPSHOT"
 ThisBuild / scalaVersion := scala3Version
 
 val commonScalacOptions = Seq(
   "-deprecation",
-  "-feature",
+  "-feature"
 )
 
 lazy val core = (project in file("core"))
@@ -23,14 +23,24 @@ lazy val storeSqlite = (project in file("store-sqlite"))
   .settings(
     name := "saga-graph-store-sqlite",
     libraryDependencies ++= Seq(
-      "org.xerial"    %  "sqlite-jdbc" % "3.46.0.0",
-      "org.scalatest" %% "scalatest"   % "3.2.18" % Test
+      "org.xerial" % "sqlite-jdbc" % "3.46.0.0",
+      "org.scalatest" %% "scalatest" % "3.2.18" % Test
+    ),
+    scalacOptions ++= commonScalacOptions
+  )
+
+lazy val examples = (project in file("examples"))
+  .dependsOn(core, storeSqlite)
+  .settings(
+    name := "saga-graph-examples",
+    libraryDependencies ++= Seq(
+      "org.scalatest" %% "scalatest" % "3.2.18" % Test
     ),
     scalacOptions ++= commonScalacOptions
   )
 
 lazy val root = (project in file("."))
-  .aggregate(core, storeSqlite)
+  .aggregate(core, storeSqlite, examples)
   .settings(
     publish / skip := true
   )

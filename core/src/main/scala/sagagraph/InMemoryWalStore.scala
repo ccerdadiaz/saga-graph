@@ -68,3 +68,19 @@ class InMemoryWalStore extends WalStore:
   def markCompensated(sagaId: SagaId): Either[Throwable, Unit] =
     completed += sagaId
     Right(())
+
+  def markActionFailed(
+      sagaId: SagaId,
+      stepName: String
+  ): Either[Throwable, Unit] =
+    store.get(sagaId).flatMap(_.find(_.entry.stepName == stepName)) match
+      case None    => Left(Exception(s"[$sagaId] step '$stepName' not found"))
+      case Some(e) => e.status = WalEntry.Status.ActionFailed; Right(())
+
+  def getStatus(
+      sagaId: SagaId,
+      stepName: String
+  ): Either[Throwable, WalEntry.Status] =
+    store.get(sagaId).flatMap(_.find(_.entry.stepName == stepName)) match
+      case None    => Left(Exception(s"[$sagaId] step '$stepName' not found"))
+      case Some(e) => Right(e.status)

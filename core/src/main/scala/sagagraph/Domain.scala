@@ -6,7 +6,7 @@ package sagagraph
 opaque type SagaId = String
 object SagaId:
   def apply(v: String): SagaId = v
-  def generate(): SagaId       = java.util.UUID.randomUUID().toString
+  def generate(): SagaId = java.util.UUID.randomUUID().toString
   extension (s: SagaId) def value: String = s
 
 // ---------------------------------------------------------------------------
@@ -18,27 +18,27 @@ object SagaId:
 // ---------------------------------------------------------------------------
 sealed trait SagaStep:
   def name: String
-  def run:  () => Either[Throwable, Unit]
+  def run: () => Either[Throwable, Unit]
 
 case class MandatoryStep(
-  name:             String,
-  run:              () => Either[Throwable, Unit],
-  compensate:       () => Either[Throwable, Unit],
-  compensationRef:  String,
-  compensationArgs: String
+    name: String,
+    run: () => Either[Throwable, Unit],
+    compensate: () => Either[Throwable, Unit],
+    compensationRef: String,
+    compensationArgs: String
 ) extends SagaStep
 
 case class OptionalStep(
-  name:             String,
-  run:              () => Either[Throwable, Unit],
-  compensate:       () => Either[Throwable, Unit],
-  compensationRef:  String,
-  compensationArgs: String
+    name: String,
+    run: () => Either[Throwable, Unit],
+    compensate: () => Either[Throwable, Unit],
+    compensationRef: String,
+    compensationArgs: String
 ) extends SagaStep
 
 case class BestEffortStep(
-  name: String,
-  run:  () => Either[Throwable, Unit]
+    name: String,
+    run: () => Either[Throwable, Unit]
 ) extends SagaStep
 
 // ---------------------------------------------------------------------------
@@ -64,15 +64,16 @@ enum SagaStatus:
 // WAL entry — compensation captured in closure + serializable reference
 // ---------------------------------------------------------------------------
 case class WalEntry(
-  stepName:         String,
-  compensate:       () => Either[Throwable, Unit],
-  compensationRef:  Option[String],
-  compensationArgs: Option[String],
-  status:           WalEntry.Status = WalEntry.Status.Pending
+    stepName: String,
+    compensate: () => Either[Throwable, Unit],
+    compensationRef: Option[String],
+    compensationArgs: Option[String],
+    status: WalEntry.Status = WalEntry.Status.Pending
 )
 
 object WalEntry:
   enum Status:
     case Pending
+    case ActionFailed
     case Compensated
     case CompensationFailed
