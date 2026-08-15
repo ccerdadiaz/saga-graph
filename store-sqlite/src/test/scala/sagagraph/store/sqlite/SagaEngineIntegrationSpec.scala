@@ -105,7 +105,9 @@ class SagaEngineIntegrationSpec
 
     result shouldBe a[SagaResult.Failed]
     compensated should contain("par-A")
-    compensated should contain("par-B")
+    compensated shouldNot contain(
+      "par-B"
+    ) // failed — service guarantees clean state
     compensated should contain("par-C")
     compensated should contain("step1")
 

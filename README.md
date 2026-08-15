@@ -1,18 +1,263 @@
 # saga-graph
 
-Non-linear SAGA orchestration for distributed systems.
+The Dark Lord needs his army ready. Equipping a goblin means coordinating
+scarce resources across independent services — and when the forge runs cold,
+everything that was reserved must find its way back to the pool.
+
+**saga-graph** is a non-linear SAGA orchestration engine for Scala:
+WAL-before-action semantics, parallel fork support, pluggable persistence,
+and zombie recovery.
+
+*The Dark Lord will be eventually pleased.*
+
+---
 
 ## The problem
 
-Most SAGA implementations are linear. Real-world processes are not.
+Distributed transactions are hard. You can't lock resources across services.
+You can't roll back what already happened in another process. And when a
+service goes silent — not failing, just *silent* — you don't know if it acted
+or not.
 
-`saga-graph` models SAGAs as directed graphs with parallel forks,
-typed compensations, and configurable step semantics.
+The SAGA pattern is the industry answer: break the transaction into steps,
+define a compensation for each one, and if anything goes wrong, compensate
+in reverse order.
 
-## Status
+**saga-graph** attempts to extend that idea to parallel execution and competition
+for real scarce resources — where a failed saga must return what it reserved
+so the next one can succeed.
 
-Work in progress. Early design phase.
+- Compensation is registered in the WAL **before** the action executes
+- A failed action means the service guarantees its own clean state — no
+  compensation needed
+- A process that dies mid-saga leaves a WAL that can be recovered
+- Scarce resources reserved by a failed saga are returned to the pool and
+  available for the next request
+
+---
+
+## The example
+
+Five goblins. Three swords. Four uniforms. Two pairs of boots.
+
+Each goblin requires:
+- **Mandatory** — measured by Weights & Measures (always available)
+- **Parallel** — a short sword from the Smithy + a uniform from Rags & Style
+  (both or neither — all-or-nothing semantics)
+- **Optional** — boots from the Cobblery (a goblin can fight barefoot)
+- **BestEffort** — portrait sent to mother (the postal raven is... unreliable)
+
+```
+=== DARK LORD'S ARMY RECRUITMENT — Operation: Ready for Battle ===
+Recruits: Grishnakh, Ugluk, Muzgash, Lagduf, Snaga
+Stock: 3 weapons | 4 uniforms | 2 boots
+
+>> Arming Lagduf...
+  [Weights & Measures] Lagduf: 58kg, 122cm. Adequate.
+  [Smithy] Lagduf — OUT OF STOCK. The forge is cold.
+  [Rags & Style] Lagduf fitted in size S. Stock: 0 remaining.
+  [Rags & Style] Lagduf's uniform returned and available for another request
+                 (compensated: full equipment could not be completed). Stock: 1 available.
+  [Compensation] Destroying measurement records for Lagduf. Never happened.
+
+>> Arming Snaga...
+  [Weights & Measures] Snaga: 55kg, 155cm. Adequate.
+  [Smithy] Snaga — OUT OF STOCK. The forge is cold.
+  [Rags & Style] Snaga fitted in size L. Stock: 0 remaining.
+  [Rags & Style] Snaga's uniform returned and available for another request
+                 (compensated: full equipment could not be completed). Stock: 1 available.
+
+=== RECRUITMENT REPORT ===
+  Grishnakh: ✓ ARMED AND READY
+  Ugluk:     ✓ ARMED AND READY
+  Muzgash:   ✓ ARMED AND READY
+  Lagduf:    ✗ FAILED — [Smithy] Out of stock
+  Snaga:     ✗ FAILED — [Smithy] Out of stock
+```
+
+Lagduf's uniform was reserved, then returned to the pool when the sword
+failed. Snaga picked it up. The resource was not lost. That is the point.
+
+Software models the real world. A uniform is not a row in a database —
+it is a uniform. When Lagduf cannot be fully equipped, that uniform must
+go back on the shelf so the next goblin can wear it. Bytes represent things.
+Compensation is not a technical detail — it is the system honoring that reality.
+
+---
+
+## The DSL
+
+```scala
+SagaGraph()
+  .step(
+    name       = "measure-goblin",
+    action     = () => WeightsAndMeasuresService.measure(name),
+    compensate = () => destroyRecords(name),
+    ref        = "destroyMeasurements",
+    args       = CompArgs("goblin" -> name)
+  )
+  .parallel(
+    SagaGraph.par(
+      name       = "acquire-weapon",
+      action     = () => SmithyService.acquireWeapon(goblin).map(_ => ()),
+      compensate = () => SmithyService.returnWeapon(goblin),
+      ref        = "returnWeapon",
+      args       = CompArgs("goblin" -> name)
+    ),
+    SagaGraph.par(
+      name       = "acquire-uniform",
+      action     = () => RagsAndStyleService.acquireUniform(goblin).map(_ => ()),
+      compensate = () => RagsAndStyleService.returnUniform(goblin),
+      ref        = "returnUniform",
+      args       = CompArgs("goblin" -> name)
+    )
+  )
+  .optional(
+    name       = "acquire-boots",
+    action     = () => CobbleryService.acquireBoots(goblin).map(_ => ()),
+    compensate = () => CobbleryService.returnBoots(goblin),
+    ref        = "returnBoots",
+    args       = CompArgs("goblin" -> name)
+  )
+  .bestEffort(
+    name   = "portrait-to-mother",
+    action = () => PortraitService.sendToMother(goblin)
+  )
+  .run(store)
+```
+
+---
+
+## Step semantics
+
+| Type | On failure | Compensation |
+|------|-----------|--------------|
+| `step` — Mandatory | Saga fails, compensate all previous steps | Required |
+| `parallel` — All-or-nothing fork | Saga fails if any branch fails, compensate all successful branches | Required per branch |
+| `optional` | Saga continues | Required |
+| `bestEffort` | Silently ignored | None |
+
+**Key invariant:** if a service returns `Left`, it guarantees its own internal
+consistency. saga-graph will not attempt to compensate a failed action — only
+successful ones that need to be undone.
+
+---
+
+## WAL semantics
+
+The Write-Ahead Log is the safety net:
+
+1. Compensation is persisted **before** the action executes
+2. If the process dies mid-saga, the WAL survives
+3. The ZombieHunter finds interrupted sagas and re-executes pending compensations
+4. Failed actions are marked `ActionFailed` — no compensation attempted
+5. Successful compensations are marked `Compensated`
+6. Compensations that fail are marked `CompensationFailed` — human intervention
+   required in current version
+
+---
+
+## Pluggable persistence
+
+```scala
+// In-memory — for tests
+val store = InMemoryWalStore()
+
+// SQLite — reference implementation, no server required
+val store = SqliteWalStore("./saga.db")
+
+// Your own — implement WalStore
+class MyStore extends WalStore:
+  def append(sagaId, entry)                    = ...
+  def loadPending(sagaId)                      = ...
+  def markCompensated(sagaId, stepName)        = ...
+  def markCompensationFailed(sagaId, stepName) = ...
+  def markActionFailed(sagaId, stepName)       = ...
+  def complete(sagaId)                         = ...
+  def findZombies(olderThanMs)                 = ...
+  def getStatus(sagaId, stepName)              = ...
+```
+
+---
+
+## Zombie recovery
+
+```scala
+val registry = CompensationRegistry()
+  .register("returnWeapon",  args => SmithyService.returnWeapon(...))
+  .register("returnUniform", args => RagsAndStyleService.returnUniform(...))
+
+// Find sagas that started but never completed
+// and re-execute their pending compensations
+ZombieHunter(store, registry).recoverAll(olderThanMs = 60_000L)
+```
+
+---
+
+## Run the example
+
+```bash
+git clone https://github.com/ccerdadiaz/saga-graph.git
+cd saga-graph
+sbt "examples/runMain sagagraph.examples.goblin.GoblinArmyDemo"
+```
+
+---
+
+## Project structure
+
+```
+saga-graph/
+├── core/          # Zero external dependencies — the pure engine
+│   ├── src/main/  # SagaGraph, SagaEngine, WalStore, ZombieHunter,
+│   │              # CompensationRegistry, Domain
+│   └── src/test/  # SagaEngineSpec, ZombieHunterSpec
+├── store-sqlite/  # Reference WalStore implementation using SQLite
+│   ├── src/main/  # SqliteWalStore
+│   └── src/test/  # SqliteWalStoreSpec, SagaEngineIntegrationSpec
+└── examples/      # Goblin Army — scarce resources and compensation in action
+    └── src/main/  # GoblinServices, ArmGoblinSaga, GoblinArmyDemo
+```
+
+---
+
+## Roadmap
+
+- temporal dimension per step: `UNKNOWN` state, configurable TTL,
+  active reconciliation for silent services
+- the Two Generals problem, explicit concessions documented
+- Sovereign Compensation: saga_id as the only key that can trigger
+  compensation — inspired by Rust ownership semantics
+- HTTP embedded — wrap example services in http4s for true microservice demo
+
+### Uncharted territory
+
+Ideas that may never leave the concept stage — or may become the most
+interesting parts of the project.
+
+- **saga-viz** — real Gantt diagram from the WAL: parallel branches, timings,
+  and compensation flows drawn from what actually happened, not what was planned
+- **SagaEventLog** — separate event log trait for observability and postmortem
+  analysis, distinct from the WAL state store
+- **happy-happy path** — demonstrate a resource returned by saga A being
+  consumed by saga B with precise timing, proving compensation is not loss
+- **store modularity** — `store-sqlite` and future stores as proper
+  installable plugins
+
+---
 
 ## License
 
-Apache 2.0
+Copyright 2026 Carlos Cerdá Díaz
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
