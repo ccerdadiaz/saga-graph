@@ -39,6 +39,7 @@ so the next one can succeed.
 ## The example
 
 Five goblins. Three swords. Four uniforms. Two pairs of boots.
+All five recruited concurrently — they compete for real scarce resources.
 
 Each goblin requires:
 - **Mandatory** — measured by Weights & Measures (always available)
@@ -49,34 +50,31 @@ Each goblin requires:
 
 ```
 === DARK LORD'S ARMY RECRUITMENT — Operation: Ready for Battle ===
-Recruits: Grishnakh, Ugluk, Muzgash, Lagduf, Snaga
-Stock: 3 weapons | 4 uniforms | 2 boots
-
->> Arming Lagduf...
-  [Weights & Measures] Lagduf: 58kg, 122cm. Adequate.
-  [Smithy] Lagduf — OUT OF STOCK. The forge is cold.
-  [Rags & Style] Lagduf fitted in size S. Stock: 0 remaining.
-  [Rags & Style] Lagduf's uniform returned and available for another request
-                 (compensated: full equipment could not be completed). Stock: 1 available.
-  [Compensation] Destroying measurement records for Lagduf. Never happened.
-
->> Arming Snaga...
-  [Weights & Measures] Snaga: 55kg, 155cm. Adequate.
-  [Smithy] Snaga — OUT OF STOCK. The forge is cold.
-  [Rags & Style] Snaga fitted in size L. Stock: 0 remaining.
-  [Rags & Style] Snaga's uniform returned and available for another request
-                 (compensated: full equipment could not be completed). Stock: 1 available.
+  [1786808650133] >> Arming Grishnakh...
+  [1786808650133] >> Arming Ugluk...
+  [1786808650133] >> Arming Lagduf...    ← all five start at the same time
+  ...
+  [1786808650399] [Rags & Style] Lagduf fitted in size S. Stock: 0 remaining.
+  [1786808650498] [Rags & Style] Lagduf's uniform returned and available
+                  for another request (compensated: full equipment could
+                  not be completed). Stock: 1 available.
 
 === RECRUITMENT REPORT ===
   Grishnakh: ✓ ARMED AND READY
   Ugluk:     ✓ ARMED AND READY
   Muzgash:   ✓ ARMED AND READY
-  Lagduf:    ✗ FAILED — [Smithy] Out of stock
-  Snaga:     ✗ FAILED — [Smithy] Out of stock
+  Lagduf:    ✗ FAILED — Parallel fork failed in: weapon-Lagduf
+  Snaga:     ✗ FAILED — Parallel fork failed in: weapon-Snaga, uniform-Snaga
+
+=== EXECUTION TIMELINE ===
+  step                      start(ms)  end(ms)  dur(ms)  parallel
+  uniform-Muzgash           26         109      83       YES ←
+  weapon-Muzgash            26         115      89       YES ←
+  boots-Muzgash             116        179      63       no
 ```
 
 Lagduf's uniform was reserved, then returned to the pool when the sword
-failed. Snaga picked it up. The resource was not lost. That is the point.
+failed. Another goblin picked it up. The resource was not lost. That is the point.
 
 Software models the real world. A uniform is not a row in a database —
 it is a uniform. When Lagduf cannot be fully equipped, that uniform must
@@ -261,3 +259,12 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
+
+## Acknowledgements
+
+The goblin army example is inspired by **Aye, Dark Overlord!** (*Sì, Oscuro Signore!*),
+a storytelling card game designed by Fabrizio Bonifacio, Massimiliano Enrico, and Chiara Ferlito,
+with art by Riccardo Crosa. Originally published by Pendragon Game Studio in 2005.
+Winner of Best Original Game at Lucca Comics and Games 2005.
+
+If you enjoyed the Dark Lord's recruitment process, the original game is worth finding.
