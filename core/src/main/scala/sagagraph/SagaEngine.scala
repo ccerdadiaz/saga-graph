@@ -13,7 +13,12 @@ import scala.concurrent.duration.*
 //   4. On failure: compensate in reverse order (LIFO)
 //   5. Respect step type (Mandatory / Optional / BestEffort)
 // ---------------------------------------------------------------------------
-class SagaEngine(sagaId: SagaId, store: WalStore, ec: ExecutionContext):
+class SagaEngine(
+    sagaId: SagaId,
+    store: WalStore,
+    ec: ExecutionContext,
+    logger: SagaLogger = SagaLogger.noOp
+):
 
   def run(elements: List[SagaElement]): SagaResult =
     execute(elements, wal = List.empty)
@@ -61,10 +66,10 @@ class SagaEngine(sagaId: SagaId, store: WalStore, ec: ExecutionContext):
 
       case s: OptionalStep =>
         val entry = WalEntry(
-          s.name,
-          s.compensate,
-          Some(s.compensationRef),
-          Some(s.compensationArgs)
+          stepName = s.name,
+          compensate = s.compensate,
+          compensationRef = s.compensationRef,
+          compensationArgs = s.compensationArgs
         )
         val updatedWal = entry :: wal
         store.append(sagaId, entry)
@@ -75,10 +80,10 @@ class SagaEngine(sagaId: SagaId, store: WalStore, ec: ExecutionContext):
 
       case s: MandatoryStep =>
         val entry = WalEntry(
-          s.name,
-          s.compensate,
-          Some(s.compensationRef),
-          Some(s.compensationArgs)
+          stepName = s.name,
+          compensate = s.compensate,
+          compensationRef = s.compensationRef,
+          compensationArgs = s.compensationArgs
         )
         val updatedWal = entry :: wal
         store.append(sagaId, entry)
@@ -102,10 +107,10 @@ class SagaEngine(sagaId: SagaId, store: WalStore, ec: ExecutionContext):
 
     val entries = steps.map(s =>
       WalEntry(
-        s.name,
-        s.compensate,
-        Some(s.compensationRef),
-        Some(s.compensationArgs)
+        stepName = s.name,
+        compensate = s.compensate,
+        compensationRef = s.compensationRef,
+        compensationArgs = s.compensationArgs
       )
     )
     entries.foreach(store.append(sagaId, _))
@@ -154,6 +159,6 @@ class SagaEngine(sagaId: SagaId, store: WalStore, ec: ExecutionContext):
         store.markCompensated(sagaId, entry.stepName)
       case Left(err) =>
         store.markCompensationFailed(sagaId, entry.stepName)
-        println(
-          s"[WARN] Compensation failed for '${entry.stepName}': ${err.getMessage}"
+        logger.warn(
+          s"Compensation failed for '${entry.stepName}': ${err.getMessage}"
         )

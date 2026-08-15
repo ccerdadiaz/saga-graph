@@ -50,28 +50,30 @@ Each goblin requires:
 
 ```
 === DARK LORD'S ARMY RECRUITMENT — Operation: Ready for Battle ===
-  [1786808650133] >> Arming Grishnakh...
-  [1786808650133] >> Arming Ugluk...
-  [1786808650133] >> Arming Lagduf...    ← all five start at the same time
+2026-08-15 22:54:49.290 [INFO ] [global-218] Saga started — Grishnakh
+2026-08-15 22:54:49.290 [INFO ] [global-219] Saga started — Ugluk
+2026-08-15 22:54:49.290 [INFO ] [global-221] Saga started — Muzgash   ← all five start at the same time
   ...
-  [1786808650399] [Rags & Style] Lagduf fitted in size S. Stock: 0 remaining.
-  [1786808650498] [Rags & Style] Lagduf's uniform returned and available
-                  for another request (compensated: full equipment could
-                  not be completed). Stock: 1 available.
+2026-08-15 22:54:49.493 [INFO ] [global-225] Weapon unavailable — Ugluk
+2026-08-15 22:54:49.539 [INFO ] [global-219] Compensating — returning uniform — Ugluk
+2026-08-15 22:54:49.587 [INFO ] [global-219] Saga failed — Ugluk — Parallel fork failed in: weapon-Ugluk
 
 === RECRUITMENT REPORT ===
   Grishnakh: ✓ ARMED AND READY
-  Ugluk:     ✓ ARMED AND READY
+  Ugluk:     ✗ FAILED — Parallel fork failed in: weapon-Ugluk
   Muzgash:   ✓ ARMED AND READY
-  Lagduf:    ✗ FAILED — Parallel fork failed in: weapon-Lagduf
+  Lagduf:    ✓ ARMED AND READY
   Snaga:     ✗ FAILED — Parallel fork failed in: weapon-Snaga, uniform-Snaga
 
 === EXECUTION TIMELINE ===
   step                      start(ms)  end(ms)  dur(ms)  parallel
-  uniform-Muzgash           26         109      83       YES ←
-  weapon-Muzgash            26         115      89       YES ←
-  boots-Muzgash             116        179      63       no
+  uniform-Muzgash           35         91       56       YES ←
+  weapon-Muzgash            35         91       56       YES ←
+  boots-Muzgash             92         142      50       no
 ```
+
+Two log streams are produced: saga lifecycle and orchestration to stdout,
+remote services to `examples/target/services.log` — completely separate.
 
 Lagduf's uniform was reserved, then returned to the pool when the sword
 failed. Another goblin picked it up. The resource was not lost. That is the point.
@@ -235,8 +237,6 @@ interesting parts of the project.
 
 - **saga-viz** — real Gantt diagram from the WAL: parallel branches, timings,
   and compensation flows drawn from what actually happened, not what was planned
-- **SagaEventLog** — separate event log trait for observability and postmortem
-  analysis, distinct from the WAL state store
 - **happy-happy path** — demonstrate a resource returned by saga A being
   consumed by saga B with precise timing, proving compensation is not loss
 - **store modularity** — `store-sqlite` and future stores as proper

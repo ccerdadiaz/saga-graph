@@ -24,16 +24,16 @@ case class MandatoryStep(
     name: String,
     run: () => Either[Throwable, Unit],
     compensate: () => Either[Throwable, Unit],
-    compensationRef: String,
-    compensationArgs: String
+    compensationRef: Option[String] = None,
+    compensationArgs: Option[String] = None
 ) extends SagaStep
 
 case class OptionalStep(
     name: String,
     run: () => Either[Throwable, Unit],
     compensate: () => Either[Throwable, Unit],
-    compensationRef: String,
-    compensationArgs: String
+    compensationRef: Option[String] = None,
+    compensationArgs: Option[String] = None
 ) extends SagaStep
 
 case class BestEffortStep(

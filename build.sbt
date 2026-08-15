@@ -34,7 +34,9 @@ lazy val examples = (project in file("examples"))
   .settings(
     name := "saga-graph-examples",
     libraryDependencies ++= Seq(
-      "org.scalatest" %% "scalatest" % "3.2.18" % Test
+      "org.scalatest" %% "scalatest" % "3.2.18" % Test,
+      "com.typesafe.scala-logging" %% "scala-logging" % "3.9.5",
+      "ch.qos.logback" % "logback-classic" % "1.5.6"
     ),
     scalacOptions ++= commonScalacOptions
   )

@@ -16,9 +16,13 @@ object GoblinArmyDemo:
   def main(args: Array[String]): Unit =
     given ExecutionContext = ExecutionContext.global
 
+    val log = Slf4jLogger("sagagraph.examples.goblin.GoblinArmyDemo")
     val goblins = List("Grishnakh", "Ugluk", "Muzgash", "Lagduf", "Snaga")
     val store = SqliteWalStore("examples/target/goblin-army.db")
 
+    // ---------------------------------------------------------------------------
+    // UI output — belongs to the demo presentation layer, not to business logging
+    // ---------------------------------------------------------------------------
     println(
       "=== DARK LORD'S ARMY RECRUITMENT — Operation: Ready for Battle ==="
     )
@@ -26,15 +30,27 @@ object GoblinArmyDemo:
     println(s"Stock: 3 weapons | 4 uniforms | 2 boots")
     println("=" * 60)
 
+    log.info(
+      s"Recruiting ${goblins.size} goblins — stock: 3 weapons, 4 uniforms, 2 boots"
+    )
+
     // Launch all goblin sagas concurrently — they compete for real resources
     val futures = goblins.map { name =>
       Future {
-        println(s"  [${System.currentTimeMillis()}] >> Arming $name...")
-        name -> ArmGoblinSaga(name, store)
+        log.info(s"Saga started — $name")
+        val result = ArmGoblinSaga(name, store)
+        result match
+          case SagaResult.Completed => log.info(s"Saga completed — $name")
+          case SagaResult.Failed(e) =>
+            log.info(s"Saga failed — $name — ${e.getMessage}")
+        name -> result
       }
     }
     val results = Await.result(Future.sequence(futures), 30.seconds)
 
+    // ---------------------------------------------------------------------------
+    // UI output — belongs to the demo presentation layer, not to business logging
+    // ---------------------------------------------------------------------------
     println("\n" + "=" * 60)
     println("=== RECRUITMENT REPORT ===")
     results.foreach { case (name, result) =>

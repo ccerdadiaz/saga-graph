@@ -1,0 +1,33 @@
+<configuration>
+
+  <!-- Our universe — structured, to stdout -->
+  <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder>
+      <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%-5level] [%thread] %msg%n</pattern>
+    </encoder>
+  </appender>
+
+  <!-- Remote services universe — separate file, simulating external logs -->
+  <appender name="SERVICES" class="ch.qos.logback.core.FileAppender">
+    <file>examples/target/services.log</file>
+    <append>false</append>
+    <encoder>
+      <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%-5level] %msg%n</pattern>
+    </encoder>
+  </appender>
+
+  <!-- Our logger — stdout only -->
+  <logger name="sagagraph" level="DEBUG" additivity="false">
+    <appender-ref ref="STDOUT"/>
+  </logger>
+
+  <!-- Services logger — file only, never mixed with ours -->
+  <logger name="GoblinServices" level="INFO" additivity="false">
+    <appender-ref ref="SERVICES"/>
+  </logger>
+
+  <root level="WARN">
+    <appender-ref ref="STDOUT"/>
+  </root>
+
+</configuration>

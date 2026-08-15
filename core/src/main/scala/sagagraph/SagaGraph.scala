@@ -8,7 +8,7 @@ class SagaGraph private (elements: List[SagaElement]):
       name: String,
       action: () => Either[Throwable, Unit],
       compensate: () => Either[Throwable, Unit],
-      ref: String = "",
+      ref: Option[String] = None,
       args: CompArgs = CompArgs.empty
   ): SagaGraph =
     val node = MandatoryStep(
@@ -16,7 +16,7 @@ class SagaGraph private (elements: List[SagaElement]):
       run = action,
       compensate = compensate,
       compensationRef = ref,
-      compensationArgs = args.toJson
+      compensationArgs = Some(args.toJson).filter(_ != "{}")
     )
     SagaGraph(elements :+ SagaElement.Single(node))
 
@@ -24,7 +24,7 @@ class SagaGraph private (elements: List[SagaElement]):
       name: String,
       action: () => Either[Throwable, Unit],
       compensate: () => Either[Throwable, Unit],
-      ref: String = "",
+      ref: Option[String] = None,
       args: CompArgs = CompArgs.empty
   ): SagaGraph =
     val node = OptionalStep(
@@ -32,7 +32,7 @@ class SagaGraph private (elements: List[SagaElement]):
       run = action,
       compensate = compensate,
       compensationRef = ref,
-      compensationArgs = args.toJson
+      compensationArgs = Some(args.toJson).filter(_ != "{}")
     )
     SagaGraph(elements :+ SagaElement.Single(node))
 
@@ -50,17 +50,18 @@ class SagaGraph private (elements: List[SagaElement]):
         run = p.action,
         compensate = p.compensate,
         compensationRef = p.ref,
-        compensationArgs = p.args.toJson
+        compensationArgs = Some(p.args.toJson).filter(_ != "{}")
       )
     )
     SagaGraph(elements :+ SagaElement.Parallel(forkNodes))
 
   def run(
       store: WalStore = InMemoryWalStore(),
-      ec: ExecutionContext = ExecutionContext.global
+      ec: ExecutionContext = ExecutionContext.global,
+      logger: SagaLogger = SagaLogger.noOp
   ): SagaResult =
     val sagaId = SagaId.generate()
-    val engine = SagaEngine(sagaId, store, ec)
+    val engine = SagaEngine(sagaId, store, ec, logger)
     engine.run(elements)
 
 object SagaGraph:
@@ -72,7 +73,7 @@ object SagaGraph:
       name: String,
       action: () => Either[Throwable, Unit],
       compensate: () => Either[Throwable, Unit],
-      ref: String = "",
+      ref: Option[String] = None,
       args: CompArgs = CompArgs.empty
   )
 
@@ -80,6 +81,6 @@ object SagaGraph:
       name: String,
       action: () => Either[Throwable, Unit],
       compensate: () => Either[Throwable, Unit],
-      ref: String = "",
+      ref: Option[String] = None,
       args: CompArgs = CompArgs.empty
   ): ParNode = ParNode(name, action, compensate, ref, args)
