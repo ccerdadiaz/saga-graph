@@ -1,18 +1,18 @@
 package sagagraph
 
-// ---------------------------------------------------------------------------
-// SagaEngine — executes a saga graph, manages WAL and compensation
-//
-// Changes from previous version:
-//   - Receives SagaId and WalStore — WAL is now durable, not only in-memory
-//   - append() called BEFORE each action (WAL invariant preserved)
-//   - markCompensated() called after each successful compensation
-//   - complete() called when saga finishes successfully
-//   - SagaEngine is instantiated per execution, not a static object
-// ---------------------------------------------------------------------------
 import scala.concurrent.{Future, Await, ExecutionContext}
 import scala.concurrent.duration.*
 
+// ---------------------------------------------------------------------------
+// SagaEngine — executes a saga graph, manages WAL and compensation
+//
+// Responsibilities:
+//   1. Execute each element in order (Single or Parallel)
+//   2. Register compensation in WAL BEFORE executing action
+//   3. Record started_at and finished_at for each action
+//   4. On failure: compensate in reverse order (LIFO)
+//   5. Respect step type (Mandatory / Optional / BestEffort)
+// ---------------------------------------------------------------------------
 class SagaEngine(sagaId: SagaId, store: WalStore, ec: ExecutionContext):
 
   def run(elements: List[SagaElement]): SagaResult =
@@ -67,8 +67,10 @@ class SagaEngine(sagaId: SagaId, store: WalStore, ec: ExecutionContext):
           Some(s.compensationArgs)
         )
         val updatedWal = entry :: wal
-        store.append(sagaId, entry) // WAL before action
-        s.run() // failure recorded but saga continues
+        store.append(sagaId, entry)
+        store.markStarted(sagaId, s.name)
+        s.run()
+        store.markFinished(sagaId, s.name)
         Right(updatedWal)
 
       case s: MandatoryStep =>
@@ -79,8 +81,11 @@ class SagaEngine(sagaId: SagaId, store: WalStore, ec: ExecutionContext):
           Some(s.compensationArgs)
         )
         val updatedWal = entry :: wal
-        store.append(sagaId, entry) // WAL before action — invariant
-        s.run() match
+        store.append(sagaId, entry)
+        store.markStarted(sagaId, s.name)
+        val result = s.run()
+        store.markFinished(sagaId, s.name)
+        result match
           case Right(_)  => Right(updatedWal)
           case Left(err) => Left((err, updatedWal))
 
@@ -93,8 +98,7 @@ class SagaEngine(sagaId: SagaId, store: WalStore, ec: ExecutionContext):
       wal: List[WalEntry]
   ): Either[(Throwable, List[WalEntry]), List[WalEntry]] =
 
-    given ExecutionContext =
-      ec // make ec available implicitly for Future.sequence
+    given ExecutionContext = ec
 
     val entries = steps.map(s =>
       WalEntry(
@@ -107,9 +111,18 @@ class SagaEngine(sagaId: SagaId, store: WalStore, ec: ExecutionContext):
     entries.foreach(store.append(sagaId, _))
     val forkWal = entries.reverse ++ wal
 
-    val futures = steps.map(s => Future(s.name -> s.run()))
+    // Launch all steps concurrently — record timing for parallelism evidence
+    val futures = steps.map(s =>
+      Future {
+        store.markStarted(sagaId, s.name)
+        val result = s.name -> s.run()
+        store.markFinished(sagaId, s.name)
+        result
+      }
+    )
     val results = Await.result(Future.sequence(futures), 30.seconds)
 
+    // Collect ALL failures — not just the first one
     val failures = results.collect { case (name, Left(err)) => name -> err }
 
     if failures.isEmpty then Right(forkWal)
@@ -120,7 +133,7 @@ class SagaEngine(sagaId: SagaId, store: WalStore, ec: ExecutionContext):
       Left((ParallelForkException(failures), forkWal))
 
   // -------------------------------------------------------------------------
-  // Compensate in LIFO order — mark each step after successful compensation
+  // Compensate in LIFO order — skip ActionFailed entries
   // -------------------------------------------------------------------------
   private def compensate(wal: List[WalEntry]): Unit =
     wal.foreach { entry =>

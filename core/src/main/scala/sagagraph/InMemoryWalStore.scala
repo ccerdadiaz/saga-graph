@@ -6,7 +6,9 @@ class InMemoryWalStore extends WalStore:
 
   private case class StoredEntry(
       entry: WalEntry,
-      @volatile var status: WalEntry.Status = WalEntry.Status.Pending
+      @volatile var status: WalEntry.Status = WalEntry.Status.Pending,
+      @volatile var startedAt: Option[Long] = None,
+      @volatile var finishedAt: Option[Long] = None
   )
 
   private val store = mutable.Map.empty[SagaId, mutable.ListBuffer[StoredEntry]]
@@ -91,3 +93,17 @@ class InMemoryWalStore extends WalStore:
 
   private def findEntry(sagaId: SagaId, stepName: String): Option[StoredEntry] =
     store.get(sagaId).flatMap(_.find(_.entry.stepName == stepName))
+
+  def markStarted(sagaId: SagaId, stepName: String): Either[Throwable, Unit] =
+    synchronized:
+      findEntry(sagaId, stepName) match
+        case None => Left(Exception(s"[$sagaId] step '$stepName' not found"))
+        case Some(e) =>
+          e.startedAt = Some(System.currentTimeMillis()); Right(())
+
+  def markFinished(sagaId: SagaId, stepName: String): Either[Throwable, Unit] =
+    synchronized:
+      findEntry(sagaId, stepName) match
+        case None => Left(Exception(s"[$sagaId] step '$stepName' not found"))
+        case Some(e) =>
+          e.finishedAt = Some(System.currentTimeMillis()); Right(())

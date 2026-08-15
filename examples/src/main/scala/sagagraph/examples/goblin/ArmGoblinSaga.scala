@@ -27,7 +27,7 @@ object ArmGoblinSaga:
             case Right(g)  => goblin = g; Right(())
             case Left(err) => Left(err),
         compensate = () =>
-          println(s"  [Compensation] Destroying measurement records for $goblinName. Never happened.")
+          println(s"  [${System.currentTimeMillis()}] [Compensation] Destroying measurement records for $goblinName. Never happened.")
           Right(()),
         ref  = "destroyMeasurements",
         args = CompArgs("goblin" -> goblinName)

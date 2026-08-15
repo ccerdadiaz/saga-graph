@@ -47,3 +47,9 @@ trait WalStore:
       sagaId: SagaId,
       stepName: String
   ): Either[Throwable, WalEntry.Status]
+
+  // Mark the moment the action started executing
+  def markStarted(sagaId: SagaId, stepName: String): Either[Throwable, Unit]
+
+  // Mark the moment the action finished executing (success or failure)
+  def markFinished(sagaId: SagaId, stepName: String): Either[Throwable, Unit]

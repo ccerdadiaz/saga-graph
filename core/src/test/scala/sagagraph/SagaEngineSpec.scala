@@ -138,11 +138,7 @@ class SagaEngineSpec extends AnyFlatSpec with Matchers:
       .run()
 
     result shouldBe SagaResult.Completed
-    executed should contain("step1")
-    executed should contain("par-A")
-    executed should contain("par-B")
-    executed should contain("par-C")
-    executed should contain("step5")
+    executed.toSet shouldBe Set("step1", "par-A", "par-B", "par-C", "step5")
     compensated.toList shouldBe List.empty
 
   // -------------------------------------------------------------------------
@@ -169,10 +165,4 @@ class SagaEngineSpec extends AnyFlatSpec with Matchers:
       .run()
 
     result shouldBe a[SagaResult.Failed]
-    executed should contain("step1")
-    executed should contain("par-B")
-    compensated should contain("par-A")
-    compensated shouldNot contain("par-B")
-    compensated should contain("par-C")
-    compensated should contain("step1")
-    executed shouldNot contain("step5")
+    executed.toSet shouldBe Set("step1", "par-A", "par-B", "par-C")

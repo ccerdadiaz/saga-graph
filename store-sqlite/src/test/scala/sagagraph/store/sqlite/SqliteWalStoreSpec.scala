@@ -20,6 +20,9 @@ class SqliteWalStoreSpec
     Files.deleteIfExists(Paths.get(dbPath))
     store = SqliteWalStore(dbPath)
 
+  override def afterEach(): Unit =
+    store.close()
+
   val dummyEntry = WalEntry(
     stepName = "LogicalReservation",
     compensate = () => Right(()),
@@ -32,7 +35,10 @@ class SqliteWalStoreSpec
   // -------------------------------------------------------------------------
   "SqliteWalStore" should "create saga and Pending entry on append" in:
     val sagaId = SagaId.generate()
-    store.append(sagaId, dummyEntry).isRight shouldBe true
+    val result = store.append(sagaId, dummyEntry)
+    withClue(s"append failed: ${result.left.toOption.getOrElse("ok")}") {
+      result.isRight shouldBe true
+    }
     val pending = store.loadPending(sagaId)
     pending.isRight shouldBe true
     pending.toOption.get.map(_.stepName) shouldBe List("LogicalReservation")
