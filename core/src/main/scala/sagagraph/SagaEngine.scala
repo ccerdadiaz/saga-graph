@@ -10,7 +10,10 @@ package sagagraph
 //   - complete() called when saga finishes successfully
 //   - SagaEngine is instantiated per execution, not a static object
 // ---------------------------------------------------------------------------
-class SagaEngine(sagaId: SagaId, store: WalStore):
+import scala.concurrent.{Future, Await, ExecutionContext}
+import scala.concurrent.duration.*
+
+class SagaEngine(sagaId: SagaId, store: WalStore, ec: ExecutionContext):
 
   def run(elements: List[SagaElement]): SagaResult =
     execute(elements, wal = List.empty)
@@ -90,6 +93,9 @@ class SagaEngine(sagaId: SagaId, store: WalStore):
       wal: List[WalEntry]
   ): Either[(Throwable, List[WalEntry]), List[WalEntry]] =
 
+    given ExecutionContext =
+      ec // make ec available implicitly for Future.sequence
+
     val entries = steps.map(s =>
       WalEntry(
         s.name,
@@ -101,17 +107,17 @@ class SagaEngine(sagaId: SagaId, store: WalStore):
     entries.foreach(store.append(sagaId, _))
     val forkWal = entries.reverse ++ wal
 
-    val results = steps.map(s => s.name -> s.run())
+    val futures = steps.map(s => Future(s.name -> s.run()))
+    val results = Await.result(Future.sequence(futures), 30.seconds)
 
-    results.collectFirst { case (_, Left(err)) => err } match
-      case None      => Right(forkWal)
-      case Some(err) =>
-        // Mark failed actions — no compensation needed for them
-        results.foreach {
-          case (name, Left(_))  => store.markActionFailed(sagaId, name)
-          case (name, Right(_)) => () // succeeded — will be compensated
-        }
-        Left((err, forkWal))
+    val failures = results.collect { case (name, Left(err)) => name -> err }
+
+    if failures.isEmpty then Right(forkWal)
+    else
+      failures.foreach { case (name, _) =>
+        store.markActionFailed(sagaId, name)
+      }
+      Left((ParallelForkException(failures), forkWal))
 
   // -------------------------------------------------------------------------
   // Compensate in LIFO order — mark each step after successful compensation

@@ -1,5 +1,7 @@
 package sagagraph
 
+import scala.concurrent.ExecutionContext
+
 class SagaGraph private (elements: List[SagaElement]):
 
   def step(
@@ -53,9 +55,12 @@ class SagaGraph private (elements: List[SagaElement]):
     )
     SagaGraph(elements :+ SagaElement.Parallel(forkNodes))
 
-  def run(store: WalStore = InMemoryWalStore()): SagaResult =
+  def run(
+      store: WalStore = InMemoryWalStore(),
+      ec: ExecutionContext = ExecutionContext.global
+  ): SagaResult =
     val sagaId = SagaId.generate()
-    val engine = SagaEngine(sagaId, store)
+    val engine = SagaEngine(sagaId, store, ec)
     engine.run(elements)
 
 object SagaGraph:

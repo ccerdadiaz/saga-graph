@@ -77,3 +77,8 @@ object WalEntry:
     case ActionFailed
     case Compensated
     case CompensationFailed
+
+case class ParallelForkException(failures: List[(String, Throwable)])
+    extends Exception(
+      s"Parallel fork failed in: ${failures.map(_._1).mkString(", ")}"
+    )
