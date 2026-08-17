@@ -200,11 +200,33 @@ ZombieHunter(store, registry).recoverAll(olderThanMs = 60_000L)
 
 ## Run the example
 
+### Local services (in-memory)
 ```bash
 git clone https://github.com/ccerdadiaz/saga-graph.git
 cd saga-graph
 sbt "examples/runMain sagagraph.examples.goblin.GoblinArmyDemo"
 ```
+
+### HTTP services (Jetty embedded)
+```bash
+sbt "examples/runMain sagagraph.examples.goblin.http.GoblinArmyHttpDemo"
+```
+Services start automatically on ports 8080-8084. While running:
+```bash
+curl -X POST http://localhost:8081/weapon/acquire \
+     -H "Content-Type: application/json" \
+     -d '{"name":"Grishnakh","weightKg":67}'
+```
+
+## Transport agnostic
+
+The saga engine sees only `() => Either[Throwable, Unit]` — it knows nothing
+about HTTP, in-memory objects, or any other transport. Both demos run the same
+saga structure. Only the service calls differ.
+
+This is the point of adoption: your existing services, whatever their transport,
+can be wrapped in a saga step. The compensation endpoint is the only addition
+you need to request from the teams that own those services.
 
 ---
 

@@ -36,7 +36,10 @@ lazy val examples = (project in file("examples"))
     libraryDependencies ++= Seq(
       "org.scalatest" %% "scalatest" % "3.2.18" % Test,
       "com.typesafe.scala-logging" %% "scala-logging" % "3.9.5",
-      "ch.qos.logback" % "logback-classic" % "1.5.6"
+      "ch.qos.logback" % "logback-classic" % "1.5.6",
+      "org.eclipse.jetty" % "jetty-server" % "11.0.20",
+      "org.eclipse.jetty" % "jetty-servlet" % "11.0.20",
+      "com.lihaoyi" %% "upickle" % "3.3.1"
     ),
     scalacOptions ++= commonScalacOptions
   )
