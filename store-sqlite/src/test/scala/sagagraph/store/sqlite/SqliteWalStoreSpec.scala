@@ -35,10 +35,7 @@ class SqliteWalStoreSpec
   // -------------------------------------------------------------------------
   "SqliteWalStore" should "create saga and Pending entry on append" in:
     val sagaId = SagaId.generate()
-    val result = store.append(sagaId, dummyEntry)
-    withClue(s"append failed: ${result.left.toOption.getOrElse("ok")}") {
-      result.isRight shouldBe true
-    }
+    store.append(sagaId, dummyEntry).isRight shouldBe true
     val pending = store.loadPending(sagaId)
     pending.isRight shouldBe true
     pending.toOption.get.map(_.stepName) shouldBe List("LogicalReservation")

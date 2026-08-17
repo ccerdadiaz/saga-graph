@@ -50,26 +50,30 @@ Each goblin requires:
 
 ```
 === DARK LORD'S ARMY RECRUITMENT — Operation: Ready for Battle ===
-2026-08-15 22:54:49.290 [INFO ] [global-218] Saga started — Grishnakh
-2026-08-15 22:54:49.290 [INFO ] [global-219] Saga started — Ugluk
-2026-08-15 22:54:49.290 [INFO ] [global-221] Saga started — Muzgash   ← all five start at the same time
+2026-08-17 12:55:34.439 [INFO ] [global-219] [88bba1a3] Saga started — Grishnakh
+2026-08-17 12:55:34.439 [INFO ] [global-221] [53b233ec] Saga started — Muzgash   ← all five start at the same time
+2026-08-17 12:55:34.439 [INFO ] [global-223] [19b3cacf] Saga started — Snaga
   ...
-2026-08-15 22:54:49.493 [INFO ] [global-225] Weapon unavailable — Ugluk
-2026-08-15 22:54:49.539 [INFO ] [global-219] Compensating — returning uniform — Ugluk
-2026-08-15 22:54:49.587 [INFO ] [global-219] Saga failed — Ugluk — Parallel fork failed in: weapon-Ugluk
+2026-08-17 12:55:34.489 [DEBUG] [global-225] [19b3cacf] Requesting uniform — Snaga  ←┐ same saga
+2026-08-17 12:55:34.489 [DEBUG] [global-224] [19b3cacf] Requesting weapon — Snaga   ←┘ two threads
+2026-08-17 12:55:34.533 [DEBUG] [global-225] [19b3cacf] Uniform acquired — Snaga: size L
+2026-08-17 12:55:34.548 [DEBUG] [global-224] [19b3cacf] Weapon acquired — Snaga: standard short sword
+  ...
+2026-08-17 12:55:34.755 [INFO ] [global-219] [88bba1a3] Saga failed — Grishnakh — Parallel fork failed in: weapon-Grishnakh, uniform-Grishnakh
 
 === RECRUITMENT REPORT ===
-  Grishnakh: ✓ ARMED AND READY
-  Ugluk:     ✗ FAILED — Parallel fork failed in: weapon-Ugluk
-  Muzgash:   ✓ ARMED AND READY
+  Grishnakh: ✗ FAILED — Parallel fork failed in: weapon-Grishnakh, uniform-Grishnakh
+  Ugluk:     ✓ ARMED AND READY
+  Muzgash:   ✗ FAILED — Parallel fork failed in: weapon-Muzgash
   Lagduf:    ✓ ARMED AND READY
-  Snaga:     ✗ FAILED — Parallel fork failed in: weapon-Snaga, uniform-Snaga
+  Snaga:     ✓ ARMED AND READY
 
-=== EXECUTION TIMELINE ===
+=== EXECUTION TIMELINE — saga 19b3cacf (Snaga) ===
   step                      start(ms)  end(ms)  dur(ms)  parallel
-  uniform-Muzgash           35         91       56       YES ←
-  weapon-Muzgash            35         91       56       YES ←
-  boots-Muzgash             92         142      50       no
+  measure-Snaga             0          32       32       no
+  uniform-Snaga             33         79       46       YES ←  ┐ same saga
+  weapon-Snaga              33         93       60       YES ←  ┘ two threads — confirmed
+  boots-Snaga               94         160      66       no
 ```
 
 Two log streams are produced: saga lifecycle and orchestration to stdout,

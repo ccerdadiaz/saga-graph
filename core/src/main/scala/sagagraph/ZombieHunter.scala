@@ -51,13 +51,12 @@ class ZombieHunter(store: WalStore, registry: CompensationRegistry):
             )
 
           case Some(handler) =>
-            val args = entry.compensationArgs.getOrElse("")
-            handler(args) match
+            handler(entry.compensationArgs) match
               case Right(_) =>
                 store.markCompensated(sagaId, entry.stepName)
                 None
               case Left(err) =>
-                store.markCompensationFailed(sagaId, entry.stepName)
+                markFailed(sagaId, entry.stepName)
                 Some(ZombieHunter.CompensationFailure(entry.stepName, ref, err))
 
   private def markFailed(sagaId: SagaId, stepName: String): Unit =

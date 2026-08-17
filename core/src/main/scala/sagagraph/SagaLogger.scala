@@ -19,12 +19,18 @@ trait SagaLogger:
   def warn(msg: => String): Unit
 
 object SagaLogger:
+
   val noOp: SagaLogger = new SagaLogger:
     def debug(msg: => String): Unit = ()
     def info(msg: => String): Unit = ()
     def warn(msg: => String): Unit = ()
 
-  val println: SagaLogger = new SagaLogger:
-    def debug(msg: => String): Unit = Predef.println(s"[DEBUG] $msg")
-    def info(msg: => String): Unit = Predef.println(s"[INFO]  $msg")
-    def warn(msg: => String): Unit = Predef.println(s"[WARN]  $msg")
+  val stdout: SagaLogger = new SagaLogger:
+    private def prefix =
+      SagaContext.current
+        .map(id => s"[${id.value.take(8)}]")
+        .getOrElse("[-]")
+
+    def debug(msg: => String): Unit = Predef.println(s"[DEBUG] $prefix $msg")
+    def info(msg: => String): Unit = Predef.println(s"[INFO]  $prefix $msg")
+    def warn(msg: => String): Unit = Predef.println(s"[WARN]  $prefix $msg")

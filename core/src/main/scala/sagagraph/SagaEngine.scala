@@ -21,7 +21,9 @@ class SagaEngine(
 ):
 
   def run(elements: List[SagaElement]): SagaResult =
-    execute(elements, wal = List.empty)
+    SagaContext.run(sagaId):
+      val result = execute(elements, wal = List.empty)
+      result
 
   // -------------------------------------------------------------------------
   // Main recursive loop
@@ -119,10 +121,12 @@ class SagaEngine(
     // Launch all steps concurrently — record timing for parallelism evidence
     val futures = steps.map(s =>
       Future {
-        store.markStarted(sagaId, s.name)
-        val result = s.name -> s.run()
-        store.markFinished(sagaId, s.name)
-        result
+        // Re-bind sagaId — fork threads do not inherit the parent ScopedValue scope
+        SagaContext.run(sagaId):
+          store.markStarted(sagaId, s.name)
+          val result = s.name -> s.run()
+          store.markFinished(sagaId, s.name)
+          result
       }
     )
     val results = Await.result(Future.sequence(futures), 30.seconds)

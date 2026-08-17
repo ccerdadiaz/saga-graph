@@ -37,13 +37,7 @@ object GoblinArmyDemo:
     // Launch all goblin sagas concurrently — they compete for real resources
     val futures = goblins.map { name =>
       Future {
-        log.info(s"Saga started — $name")
-        val result = ArmGoblinSaga(name, store)
-        result match
-          case SagaResult.Completed => log.info(s"Saga completed — $name")
-          case SagaResult.Failed(e) =>
-            log.info(s"Saga failed — $name — ${e.getMessage}")
-        name -> result
+        name -> ArmGoblinSaga(name, store)
       }
     }
     val results = Await.result(Future.sequence(futures), 30.seconds)

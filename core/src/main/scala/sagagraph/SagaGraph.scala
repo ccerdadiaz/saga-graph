@@ -58,9 +58,9 @@ class SagaGraph private (elements: List[SagaElement]):
   def run(
       store: WalStore = InMemoryWalStore(),
       ec: ExecutionContext = ExecutionContext.global,
-      logger: SagaLogger = SagaLogger.noOp
+      logger: SagaLogger = SagaLogger.noOp,
+      sagaId: SagaId = SagaId.generate()
   ): SagaResult =
-    val sagaId = SagaId.generate()
     val engine = SagaEngine(sagaId, store, ec, logger)
     engine.run(elements)
 

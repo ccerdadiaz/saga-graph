@@ -12,14 +12,17 @@ package sagagraph
 //     .register("rollbackPhysical",  args => physicalService.rollback(args))
 // ---------------------------------------------------------------------------
 class CompensationRegistry:
-    private val handlers = scala.collection.mutable.Map.empty[String, String => Either[Throwable, Unit]]
 
-    def register(
-        ref:     String,
-        handler: String => Either[Throwable, Unit]  
-    ): CompensationRegistry =
-        handlers(ref) = handler
-        this
+  private val handlers =
+    scala.collection.mutable.Map
+      .empty[String, Option[String] => Either[Throwable, Unit]]
 
-    def resolve(ref: String): Option[String => Either[Throwable, Unit]] =
-        handlers.get(ref)
+  def register(
+      ref: String,
+      handler: Option[String] => Either[Throwable, Unit]
+  ): CompensationRegistry =
+    handlers(ref) = handler
+    this
+
+  def resolve(ref: String): Option[Option[String] => Either[Throwable, Unit]] =
+    handlers.get(ref)
