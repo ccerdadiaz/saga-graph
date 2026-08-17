@@ -286,6 +286,31 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
+
+## Known limitations
+
+### Compensation parameters must be known at design time
+
+The current version assumes that compensation parameters are known when the
+saga is defined. This covers the deterministic model — where the orchestrator
+knows which resource it will use before executing the action.
+
+The non-deterministic model — where a service returns a resource identifier
+that is needed for compensation (e.g. "give me any available sword" → receives
+ID "J" → must return "J") — is not fully supported. Compensation with a
+runtime-generated ID requires a second WAL write after the action succeeds,
+which is planned but not yet implemented.
+
+As a workaround, use BestEffort for steps where the compensation resource
+is unknown at design time — accepting that those steps cannot be automatically
+compensated.
+
+### Irreversible actions
+
+Actions with no possible inverse (send email, burn log, publish event) should
+be modeled as BestEffort steps. saga-graph cannot compensate what cannot be
+undone — and neither can anything else.
+
 ## Acknowledgements
 
 The goblin army example is inspired by **Aye, Dark Overlord!** (*Sì, Oscuro Signore!*),
