@@ -4,17 +4,32 @@ import sagagraph.*
 import sagagraph.CompArgs.given
 
 // ---------------------------------------------------------------------------
+// GoblinEquipment — resolved resources before the saga starts
+//
+// Resource selection is the caller's responsibility — saga-graph only
+// requires that the chosen IDs are known before the saga starts.
+// ---------------------------------------------------------------------------
+case class GoblinEquipment(
+  weaponId:  String,
+  uniformId: String,
+  bootsId:   Option[String]  // None if no boots available — optional step
+)
+
+// ---------------------------------------------------------------------------
 // ArmGoblinSaga — equips a single goblin for the Dark Lord's army
+//
+// Receives pre-resolved resource IDs — compensation parameters are known
+// before any action executes. This is the deterministic model.
 //
 // Steps:
 //   1. Mandatory  — measure the goblin (Weights & Measures)
-//   2. Parallel   — acquire weapon (Smithy) + acquire uniform (Rags & Style)
-//   3. Optional   — acquire boots (Cobblery) — barefoot is acceptable
-//   4. BestEffort — send portrait to mother (Portrait) — always fails
+//   2. Parallel   — acquire weapon + acquire uniform (all-or-nothing)
+//   3. Optional   — acquire boots (barefoot is acceptable)
+//   4. BestEffort — send portrait to mother (always fails)
 // ---------------------------------------------------------------------------
 object ArmGoblinSaga:
 
-  def apply(goblinName: String, store: WalStore): SagaResult =
+  def apply(goblinName: String, equipment: GoblinEquipment, store: WalStore): SagaResult =
 
     val log    = Slf4jLogger("sagagraph.examples.goblin.ArmGoblinSaga")
     val sagaId = SagaId.generate()
@@ -22,7 +37,7 @@ object ArmGoblinSaga:
 
     SagaContext.run(sagaId):
 
-      log.info(s"Saga started — $goblinName")
+      log.info(s"Saga started — $goblinName [weapon:${equipment.weaponId}, uniform:${equipment.uniformId}, boots:${equipment.bootsId.getOrElse("none")}]")
 
       val result = SagaGraph()
         .step(
@@ -47,54 +62,62 @@ object ArmGoblinSaga:
           SagaGraph.par(
             name   = s"weapon-$goblinName",
             action = () =>
-              log.debug(s"Requesting weapon — $goblinName")
-              SmithyService.acquireWeapon(goblin) match
+              log.debug(s"Requesting weapon ${equipment.weaponId} — $goblinName")
+              SmithyService.acquire(equipment.weaponId) match
                 case Right(w) =>
-                  log.debug(s"Weapon acquired — $goblinName: ${w.size} ${w.kind}")
+                  log.debug(s"Weapon acquired — $goblinName: ${w.label}")
                   Right(())
                 case Left(err) =>
-                  log.info(s"Weapon unavailable — $goblinName")
+                  log.info(s"Weapon ${equipment.weaponId} unavailable — $goblinName")
                   Left(err),
             compensate = () =>
-              log.info(s"Compensating — returning weapon — $goblinName")
-              SmithyService.returnWeapon(goblin),
+              log.info(s"Compensating — returning weapon ${equipment.weaponId} — $goblinName")
+              SmithyService.return_(equipment.weaponId),
             ref  = Some("returnWeapon"),
-            args = CompArgs("goblin" -> goblinName)
+            args = CompArgs("weaponId" -> equipment.weaponId)
           ),
           SagaGraph.par(
             name   = s"uniform-$goblinName",
             action = () =>
-              log.debug(s"Requesting uniform — $goblinName")
-              RagsAndStyleService.acquireUniform(goblin) match
+              log.debug(s"Requesting uniform ${equipment.uniformId} — $goblinName")
+              RagsAndStyleService.acquire(equipment.uniformId) match
                 case Right(u) =>
                   log.debug(s"Uniform acquired — $goblinName: size ${u.size}")
                   Right(())
                 case Left(err) =>
-                  log.info(s"Uniform unavailable — $goblinName")
+                  log.info(s"Uniform ${equipment.uniformId} unavailable — $goblinName")
                   Left(err),
             compensate = () =>
-              log.info(s"Compensating — returning uniform — $goblinName")
-              RagsAndStyleService.returnUniform(goblin),
+              log.info(s"Compensating — returning uniform ${equipment.uniformId} — $goblinName")
+              RagsAndStyleService.return_(equipment.uniformId),
             ref  = Some("returnUniform"),
-            args = CompArgs("goblin" -> goblinName)
+            args = CompArgs("uniformId" -> equipment.uniformId)
           )
         )
         .optional(
           name   = s"boots-$goblinName",
           action = () =>
-            log.debug(s"Requesting boots — $goblinName")
-            CobbleryService.acquireBoots(goblin) match
-              case Right(b) =>
-                log.debug(s"Boots acquired — $goblinName: size ${b.size}")
-                Right(())
-              case Left(err) =>
-                log.info(s"Boots unavailable — $goblinName — going barefoot")
-                Left(err),
+            equipment.bootsId match
+              case None =>
+                log.debug(s"No boots available for $goblinName — going barefoot")
+                Left(OutOfStockException("Cobblery"))
+              case Some(id) =>
+                log.debug(s"Requesting boots $id — $goblinName")
+                CobbleryService.acquire(id) match
+                  case Right(b) =>
+                    log.debug(s"Boots acquired — $goblinName: size ${b.bootSize}")
+                    Right(())
+                  case Left(err) =>
+                    log.info(s"Boots $id unavailable — $goblinName — going barefoot")
+                    Left(err),
           compensate = () =>
-            log.info(s"Compensating — returning boots — $goblinName")
-            CobbleryService.returnBoots(goblin),
-          ref  = Some("returnBoots"),
-          args = CompArgs("goblin" -> goblinName)
+            equipment.bootsId match
+              case None => Right(())
+              case Some(id) =>
+                log.info(s"Compensating — returning boots $id — $goblinName")
+                CobbleryService.return_(id),
+          ref  = equipment.bootsId.map(_ => "returnBoots"),
+          args = CompArgs("bootsId" -> equipment.bootsId.getOrElse("none"))
         )
         .bestEffort(
           name   = s"portrait-$goblinName",

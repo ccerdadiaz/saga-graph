@@ -3,7 +3,6 @@ package sagagraph.examples.goblin.http
 import org.eclipse.jetty.server.Server
 import org.eclipse.jetty.servlet.{ServletContextHandler, ServletHolder}
 import jakarta.servlet.http.{HttpServlet, HttpServletRequest, HttpServletResponse}
-import java.util.concurrent.atomic.AtomicInteger
 import upickle.default.*
 import GoblinServiceLog.remote
 
@@ -11,62 +10,80 @@ import GoblinServiceLog.remote
 // RagsAndStyleHttpService — HTTP server exposing the Rags & Style service
 //
 // Endpoints:
-//   POST /uniform/acquire  {"name":"Grishnakh","heightCm":143}
-//                          → 200 {"size":"S","color":"Dark Army Green™"}
-//                          → 409 {"error":"Out of stock"}
-//
-//   POST /uniform/return   {"name":"Grishnakh"}
-//                          → 200 {"status":"returned","stock":N}
+//   GET  /uniform/available?size=S   → ["uniform-1","uniform-3"]
+//   POST /uniform/acquire  {"uniformId":"uniform-1"}
+//                          → 200 {"id":"uniform-1","size":"S","color":"Dark Army Green™"}
+//                          → 409 {"error":"Not available"}
+//   POST /uniform/return   {"uniformId":"uniform-1"}
+//                          → 200 {"status":"returned"}
 //
 // The compensation endpoint (/uniform/return) was added to support saga-graph
 // adoption — existing services would need a similar endpoint.
 // ---------------------------------------------------------------------------
 object RagsAndStyleHttpService:
 
-  private val stock = AtomicInteger(4)
+  private case class UniformEntry(id: String, size: String, var available: Boolean = true)
 
-  case class AcquireRequest(name: String, heightCm: Int)  derives ReadWriter
-  case class UniformResponse(size: String, color: String) derives ReadWriter
-  case class ReturnRequest(name: String)                  derives ReadWriter
-  case class ReturnResponse(status: String, stock: Int)   derives ReadWriter
-  case class ErrorResponse(error: String)                 derives ReadWriter
+  private val catalog = List(
+    UniformEntry("uniform-1", "S"),
+    UniformEntry("uniform-2", "L"),
+    UniformEntry("uniform-3", "S"),
+    UniformEntry("uniform-4", "L")
+  )
+
+  // Returns available IDs for given size in random order
+  def getAvailable(size: String): List[String] =
+    synchronized { scala.util.Random.shuffle(catalog.filter(u => u.available && u.size == size).map(_.id)) }
 
   def start(port: Int = 8082): Server =
     val server  = Server(port)
     val context = ServletContextHandler()
     context.setContextPath("/")
     server.setHandler(context)
-    context.addServlet(ServletHolder(AcquireServlet()), "/uniform/acquire")
-    context.addServlet(ServletHolder(ReturnServlet()),  "/uniform/return")
+    context.addServlet(ServletHolder(AvailableServlet()), "/uniform/available")
+    context.addServlet(ServletHolder(AcquireServlet()),   "/uniform/acquire")
+    context.addServlet(ServletHolder(ReturnServlet()),    "/uniform/return")
     server.start()
     server
 
-  def reset(initialStock: Int = 4): Unit = stock.set(initialStock)
+  class AvailableServlet extends HttpServlet:
+    override def doGet(req: HttpServletRequest, res: HttpServletResponse): Unit =
+      val size = Option(req.getParameter("size")).getOrElse("")
+      res.setContentType("application/json")
+      res.setStatus(200)
+      res.getWriter.write(write(getAvailable(size)))
+
+  case class AcquireRequest(uniformId: String)                           derives ReadWriter
+  case class UniformResponse(id: String, size: String, color: String)    derives ReadWriter
+  case class ReturnRequest(uniformId: String)                            derives ReadWriter
+  case class ReturnResponse(status: String)                              derives ReadWriter
+  case class ErrorResponse(error: String)                                derives ReadWriter
 
   class AcquireServlet extends HttpServlet:
     override def doPost(req: HttpServletRequest, res: HttpServletResponse): Unit =
-      val body      = req.getReader.lines().toArray.mkString
-      val request   = read[AcquireRequest](body)
-      val remaining = stock.decrementAndGet()
-      if remaining >= 0 then
-        val size = if request.heightCm > 145 then "L" else "S"
-        remote.info(s"[Rags & Style] ${request.name} fitted in size $size. Stock: $remaining remaining.")
-        res.setContentType("application/json")
-        res.setStatus(200)
-        res.getWriter.write(write(UniformResponse(size, "Dark Army Green™")))
-      else
-        stock.incrementAndGet()
-        remote.info(s"[Rags & Style] ${request.name} — OUT OF STOCK. Naked goblins are undignified.")
-        res.setContentType("application/json")
-        res.setStatus(409)
-        res.getWriter.write(write(ErrorResponse("Out of stock")))
+      val body    = req.getReader.lines().toArray.mkString
+      val request = read[AcquireRequest](body)
+      synchronized:
+        catalog.find(u => u.id == request.uniformId && u.available) match
+          case Some(u) =>
+            u.available = false
+            remote.info(s"[Rags & Style] ${request.uniformId} (size ${u.size}) acquired.")
+            res.setContentType("application/json")
+            res.setStatus(200)
+            res.getWriter.write(write(UniformResponse(u.id, u.size, "Dark Army Green™")))
+          case None =>
+            remote.info(s"[Rags & Style] ${request.uniformId} — not available. Naked goblins are undignified.")
+            res.setContentType("application/json")
+            res.setStatus(409)
+            res.getWriter.write(write(ErrorResponse("Not available")))
 
   class ReturnServlet extends HttpServlet:
     override def doPost(req: HttpServletRequest, res: HttpServletResponse): Unit =
       val body    = req.getReader.lines().toArray.mkString
       val request = read[ReturnRequest](body)
-      val current = stock.incrementAndGet()
-      remote.info(s"[Rags & Style] ${request.name}'s uniform returned and available for another request. Stock: $current available.")
+      synchronized:
+        catalog.find(_.id == request.uniformId).foreach(_.available = true)
+        remote.info(s"[Rags & Style] ${request.uniformId} returned and available for another request.")
       res.setContentType("application/json")
       res.setStatus(200)
-      res.getWriter.write(write(ReturnResponse("returned", current)))
+      res.getWriter.write(write(ReturnResponse("returned")))

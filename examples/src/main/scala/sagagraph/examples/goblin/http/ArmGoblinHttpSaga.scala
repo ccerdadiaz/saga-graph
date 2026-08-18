@@ -1,20 +1,21 @@
 package sagagraph.examples.goblin.http
 
-import sagagraph.*
-import sagagraph.CompArgs.given
-import sagagraph.examples.goblin.{Goblin, OutOfStockException}
-import sagagraph.examples.goblin.{Slf4jLogger}
+import _root_.sagagraph.{WalStore, SagaResult, SagaId, SagaGraph, SagaContext}
+import _root_.sagagraph.CompArgs.given
+import _root_.sagagraph.examples.goblin.{Goblin, GoblinEquipment, OutOfStockException, Slf4jLogger}
 
 // ---------------------------------------------------------------------------
 // ArmGoblinHttpSaga — equips a single goblin using real HTTP services
 //
+// Receives pre-resolved resource IDs — compensation parameters are known
+// before any action executes. This is the deterministic model.
+//
 // Identical saga structure to ArmGoblinSaga — only the service calls differ.
-// The saga engine sees () => Either[Throwable, Unit] in both cases.
-// This demonstrates that saga-graph is transport-agnostic.
+// Demonstrates that saga-graph is transport-agnostic.
 // ---------------------------------------------------------------------------
 object ArmGoblinHttpSaga:
 
-  def apply(goblinName: String, store: WalStore): SagaResult =
+  def apply(goblinName: String, equipment: GoblinEquipment, store: WalStore): SagaResult =
 
     val log    = Slf4jLogger("sagagraph.examples.goblin.http.ArmGoblinHttpSaga")
     val sagaId = SagaId.generate()
@@ -22,7 +23,7 @@ object ArmGoblinHttpSaga:
 
     SagaContext.run(sagaId):
 
-      log.info(s"Saga started — $goblinName")
+      log.info(s"Saga started — $goblinName [weapon:${equipment.weaponId}, uniform:${equipment.uniformId}, boots:${equipment.bootsId.getOrElse("none")}]")
 
       val result = SagaGraph()
         .step(
@@ -41,60 +42,68 @@ object ArmGoblinHttpSaga:
             log.info(s"Compensating — destroying measurement records for $goblinName")
             Right(()),
           ref  = Some("destroyMeasurements"),
-          args = CompArgs("goblin" -> goblinName)
+          args = _root_.sagagraph.CompArgs("goblin" -> goblinName)
         )
         .parallel(
           SagaGraph.par(
             name   = s"weapon-$goblinName",
             action = () =>
-              log.debug(s"Requesting weapon — $goblinName")
-              GoblinHttpClient.acquireWeapon(goblin) match
+              log.debug(s"Requesting weapon ${equipment.weaponId} — $goblinName")
+              GoblinHttpClient.acquireWeapon(equipment.weaponId) match
                 case Right(w) =>
-                  log.debug(s"Weapon acquired — $goblinName: ${w.size} ${w.kind}")
+                  log.debug(s"Weapon acquired — $goblinName: ${w.label}")
                   Right(())
                 case Left(err) =>
-                  log.info(s"Weapon unavailable — $goblinName")
+                  log.info(s"Weapon ${equipment.weaponId} unavailable — $goblinName")
                   Left(err),
             compensate = () =>
-              log.info(s"Compensating — returning weapon — $goblinName")
-              GoblinHttpClient.returnWeapon(goblin),
+              log.info(s"Compensating — returning weapon ${equipment.weaponId} — $goblinName")
+              GoblinHttpClient.returnWeapon(equipment.weaponId),
             ref  = Some("returnWeapon"),
-            args = CompArgs("goblin" -> goblinName)
+            args = _root_.sagagraph.CompArgs("weaponId" -> equipment.weaponId)
           ),
           SagaGraph.par(
             name   = s"uniform-$goblinName",
             action = () =>
-              log.debug(s"Requesting uniform — $goblinName")
-              GoblinHttpClient.acquireUniform(goblin) match
+              log.debug(s"Requesting uniform ${equipment.uniformId} — $goblinName")
+              GoblinHttpClient.acquireUniform(equipment.uniformId) match
                 case Right(u) =>
                   log.debug(s"Uniform acquired — $goblinName: size ${u.size}")
                   Right(())
                 case Left(err) =>
-                  log.info(s"Uniform unavailable — $goblinName")
+                  log.info(s"Uniform ${equipment.uniformId} unavailable — $goblinName")
                   Left(err),
             compensate = () =>
-              log.info(s"Compensating — returning uniform — $goblinName")
-              GoblinHttpClient.returnUniform(goblin),
+              log.info(s"Compensating — returning uniform ${equipment.uniformId} — $goblinName")
+              GoblinHttpClient.returnUniform(equipment.uniformId),
             ref  = Some("returnUniform"),
-            args = CompArgs("goblin" -> goblinName)
+            args = _root_.sagagraph.CompArgs("uniformId" -> equipment.uniformId)
           )
         )
         .optional(
           name   = s"boots-$goblinName",
           action = () =>
-            log.debug(s"Requesting boots — $goblinName")
-            GoblinHttpClient.acquireBoots(goblin) match
-              case Right(b) =>
-                log.debug(s"Boots acquired — $goblinName: size ${b.size}")
-                Right(())
-              case Left(err) =>
-                log.info(s"Boots unavailable — $goblinName — going barefoot")
-                Left(err),
+            equipment.bootsId match
+              case None =>
+                log.debug(s"No boots available for $goblinName — going barefoot")
+                Left(OutOfStockException("Cobblery"))
+              case Some(id) =>
+                log.debug(s"Requesting boots $id — $goblinName")
+                GoblinHttpClient.acquireBoots(id) match
+                  case Right(b) =>
+                    log.debug(s"Boots acquired — $goblinName: size ${b.bootSize}")
+                    Right(())
+                  case Left(err) =>
+                    log.info(s"Boots $id unavailable — $goblinName — going barefoot")
+                    Left(err),
           compensate = () =>
-            log.info(s"Compensating — returning boots — $goblinName")
-            GoblinHttpClient.returnBoots(goblin),
-          ref  = Some("returnBoots"),
-          args = CompArgs("goblin" -> goblinName)
+            equipment.bootsId match
+              case None => Right(())
+              case Some(id) =>
+                log.info(s"Compensating — returning boots $id — $goblinName")
+                GoblinHttpClient.returnBoots(id),
+          ref  = equipment.bootsId.map(_ => "returnBoots"),
+          args = _root_.sagagraph.CompArgs("bootsId" -> equipment.bootsId.getOrElse("none"))
         )
         .bestEffort(
           name   = s"portrait-$goblinName",

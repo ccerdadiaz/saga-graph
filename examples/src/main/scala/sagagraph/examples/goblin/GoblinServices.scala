@@ -1,14 +1,15 @@
 package sagagraph.examples.goblin
 
-import java.util.concurrent.atomic.AtomicInteger
 import org.slf4j.LoggerFactory
 
 // ---------------------------------------------------------------------------
 // Goblin Army Supply Services — resources are scarce, first come first served
 //
-// Each service has a fixed stock. Concurrent sagas compete for resources.
-// Right(resource) — resource acquired
-// Left(OutOfStockException) — nothing left, saga must compensate
+// Each service maintains a fixed catalog of resources with availability flags.
+// getAvailable() returns available IDs in random order — simulates a
+// service-side selection policy. In production the service would apply its
+// own business criteria (priority, TTL lease, etc.).
+// The caller applies additional business criteria to choose from the list.
 //
 // These services simulate remote endpoints — in production each would be
 // a separate process with its own logging infrastructure.
@@ -16,125 +17,137 @@ import org.slf4j.LoggerFactory
 // Random latency simulates real remote service response times.
 // ---------------------------------------------------------------------------
 
-// Shared logger — routes to services.log via logback configuration
 private val log = LoggerFactory.getLogger("GoblinServices")
 
 case class OutOfStockException(service: String)
     extends Exception(s"[$service] Out of stock — the Dark Lord is displeased")
 
 case class Goblin(name: String, weightKg: Int, heightCm: Int)
-case class Weapon(kind: String, size: String)
-case class Uniform(size: String, color: String)
-case class Boot(size: Int)
+case class Weapon(id: String, label: String)
+case class Uniform(id: String, size: String, color: String)
+case class Boot(id: String, bootSize: Int)
 
 // ---------------------------------------------------------------------------
-// Weights & Measures — always available, no stock limit
+// Weights & Measures — always available, no catalog needed
 // ---------------------------------------------------------------------------
 object WeightsAndMeasuresService:
   def measure(goblinName: String): Either[Throwable, Goblin] =
     latency()
     val weight = 40 + (goblinName.length * 3) % 30
     val height = 120 + (goblinName.length * 7) % 40
-    log.info(
-      s"[Weights & Measures] $goblinName: ${weight}kg, ${height}cm. Adequate."
-    )
+    log.info(s"[Weights & Measures] $goblinName: ${weight}kg, ${height}cm. Adequate.")
     Right(Goblin(goblinName, weight, height))
 
 // ---------------------------------------------------------------------------
-// Smithy & Kitchenware — limited stock of short weapons
+// Smithy & Kitchenware — fixed catalog of weapons
 // ---------------------------------------------------------------------------
 object SmithyService:
-  private val stock = AtomicInteger(3)
 
-  def acquireWeapon(goblin: Goblin): Either[Throwable, Weapon] =
+  private case class WeaponEntry(id: String, label: String, var available: Boolean = true)
+
+  private val catalog = List(
+    WeaponEntry("sword-1", "heavy short sword"),
+    WeaponEntry("sword-2", "standard short sword"),
+    WeaponEntry("sword-3", "heavy short sword")
+  )
+
+  // Returns available IDs in random order — simulates service-side selection policy
+  def getAvailable(): List[String] =
+    synchronized { scala.util.Random.shuffle(catalog.filter(_.available).map(_.id)) }
+
+  def acquire(weaponId: String): Either[Throwable, Weapon] =
     latency()
-    val remaining = stock.decrementAndGet()
-    if remaining >= 0 then
-      val weapon = Weapon(
-        "short sword",
-        if goblin.weightKg > 55 then "heavy" else "standard"
-      )
-      log.info(
-        s"[Smithy] ${goblin.name} equipped with ${weapon.size} ${weapon.kind}. Stock: $remaining remaining."
-      )
-      Right(weapon)
-    else
-      stock.incrementAndGet()
-      log.info(s"[Smithy] ${goblin.name} — OUT OF STOCK. The forge is cold.")
-      Left(OutOfStockException("Smithy"))
+    synchronized:
+      catalog.find(w => w.id == weaponId && w.available) match
+        case Some(w) =>
+          w.available = false
+          log.info(s"[Smithy] $weaponId acquired. Available: ${getAvailable().mkString(", ")}.")
+          Right(Weapon(w.id, w.label))
+        case None =>
+          log.info(s"[Smithy] $weaponId — not available. The forge is cold.")
+          Left(OutOfStockException("Smithy"))
 
-  def returnWeapon(goblin: Goblin): Either[Throwable, Unit] =
+  def return_(weaponId: String): Either[Throwable, Unit] =
     latency()
-    val current = stock.incrementAndGet()
-    log.info(
-      s"[Smithy] ${goblin.name}'s short sword returned and available for another request (compensated: full equipment could not be completed). Stock: $current available."
-    )
-    Right(())
-
-  def reset(initialStock: Int = 3): Unit = stock.set(initialStock)
+    synchronized:
+      catalog.find(_.id == weaponId).foreach(_.available = true)
+      log.info(s"[Smithy] $weaponId returned and available for another request. Available: ${getAvailable().mkString(", ")}.")
+      Right(())
 
 // ---------------------------------------------------------------------------
-// Rags & Style — limited stock of uniforms
+// Rags & Style — fixed catalog of uniforms
 // ---------------------------------------------------------------------------
 object RagsAndStyleService:
-  private val stock = AtomicInteger(4)
 
-  def acquireUniform(goblin: Goblin): Either[Throwable, Uniform] =
+  private case class UniformEntry(id: String, size: String, var available: Boolean = true)
+
+  private val catalog = List(
+    UniformEntry("uniform-1", "S"),
+    UniformEntry("uniform-2", "L"),
+    UniformEntry("uniform-3", "S"),
+    UniformEntry("uniform-4", "L")
+  )
+
+  // Returns available IDs in random order — simulates service-side selection policy
+  def getAvailable(size: String): List[String] =
+    synchronized { scala.util.Random.shuffle(catalog.filter(u => u.available && u.size == size).map(_.id)) }
+
+  def acquire(uniformId: String): Either[Throwable, Uniform] =
     latency()
-    val remaining = stock.decrementAndGet()
-    if remaining >= 0 then
-      val size = if goblin.heightCm > 145 then "L" else "S"
-      val uniform = Uniform(size, "Dark Army Green™")
-      log.info(
-        s"[Rags & Style] ${goblin.name} fitted in size $size. Stock: $remaining remaining."
-      )
-      Right(uniform)
-    else
-      stock.incrementAndGet()
-      log.info(
-        s"[Rags & Style] ${goblin.name} — OUT OF STOCK. Naked goblins are undignified."
-      )
-      Left(OutOfStockException("Rags & Style"))
+    synchronized:
+      catalog.find(u => u.id == uniformId && u.available) match
+        case Some(u) =>
+          u.available = false
+          log.info(s"[Rags & Style] $uniformId (size ${u.size}) acquired. Available: ${catalog.filter(_.available).map(_.id).mkString(", ")}.")
+          Right(Uniform(u.id, u.size, "Dark Army Green™"))
+        case None =>
+          log.info(s"[Rags & Style] $uniformId — not available. Naked goblins are undignified.")
+          Left(OutOfStockException("Rags & Style"))
 
-  def returnUniform(goblin: Goblin): Either[Throwable, Unit] =
+  def return_(uniformId: String): Either[Throwable, Unit] =
     latency()
-    val current = stock.incrementAndGet()
-    log.info(
-      s"[Rags & Style] ${goblin.name}'s uniform returned and available for another request (compensated: full equipment could not be completed). Stock: $current available."
-    )
-    Right(())
-
-  def reset(initialStock: Int = 4): Unit = stock.set(initialStock)
+    synchronized:
+      catalog.find(_.id == uniformId).foreach(_.available = true)
+      log.info(s"[Rags & Style] $uniformId returned and available for another request.")
+      Right(())
 
 // ---------------------------------------------------------------------------
-// Cobblery — optional, limited stock of boots
+// Cobblery — fixed catalog of boots
 // ---------------------------------------------------------------------------
 object CobbleryService:
-  private val stock = AtomicInteger(2)
 
-  def acquireBoots(goblin: Goblin): Either[Throwable, Boot] =
+  private case class BootsEntry(id: String, bootSize: Int, var available: Boolean = true)
+
+  private val catalog = List(
+    BootsEntry("boots-1", 7),
+    BootsEntry("boots-2", 8)
+  )
+
+  // Returns available IDs in random order — simulates service-side selection policy
+  def getAvailable(size: Int): List[String] =
+    synchronized { scala.util.Random.shuffle(catalog.filter(b => b.available && b.bootSize == size).map(_.id)) }
+
+  def getAvailableAny(): List[String] =
+    synchronized { scala.util.Random.shuffle(catalog.filter(_.available).map(_.id)) }
+
+  def acquire(bootsId: String): Either[Throwable, Boot] =
     latency()
-    val remaining = stock.decrementAndGet()
-    if remaining >= 0 then
-      val size = (goblin.weightKg / 10) + 2
-      log.info(
-        s"[Cobblery] ${goblin.name} gets boots size $size. Stock: $remaining remaining."
-      )
-      Right(Boot(size))
-    else
-      stock.incrementAndGet()
-      log.info(s"[Cobblery] ${goblin.name} — OUT OF STOCK. Barefoot it is.")
-      Left(OutOfStockException("Cobblery"))
+    synchronized:
+      catalog.find(b => b.id == bootsId && b.available) match
+        case Some(b) =>
+          b.available = false
+          log.info(s"[Cobblery] $bootsId (size ${b.bootSize}) acquired. Available: ${catalog.filter(_.available).map(_.id).mkString(", ")}.")
+          Right(Boot(b.id, b.bootSize))
+        case None =>
+          log.info(s"[Cobblery] $bootsId — not available. Barefoot it is.")
+          Left(OutOfStockException("Cobblery"))
 
-  def returnBoots(goblin: Goblin): Either[Throwable, Unit] =
+  def return_(bootsId: String): Either[Throwable, Unit] =
     latency()
-    val current = stock.incrementAndGet()
-    log.info(
-      s"[Cobblery] ${goblin.name}'s boots returned and available for another request (compensated: full equipment could not be completed). Stock: $current available."
-    )
-    Right(())
-
-  def reset(initialStock: Int = 2): Unit = stock.set(initialStock)
+    synchronized:
+      catalog.find(_.id == bootsId).foreach(_.available = true)
+      log.info(s"[Cobblery] $bootsId returned and available for another request.")
+      Right(())
 
 // ---------------------------------------------------------------------------
 // Portrait Service — best effort, always unreliable
@@ -142,9 +155,7 @@ object CobbleryService:
 object PortraitService:
   def sendToMother(goblin: Goblin): Either[Throwable, Unit] =
     latency()
-    log.info(
-      s"[Portrait] Attempting to send ${goblin.name}'s portrait to mother..."
-    )
+    log.info(s"[Portrait] Attempting to send ${goblin.name}'s portrait to mother...")
     log.warn(s"[Portrait] Postal raven lost. Mother will never know.")
     Left(Exception("Raven not found"))
 
