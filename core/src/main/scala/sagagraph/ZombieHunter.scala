@@ -1,5 +1,8 @@
 package sagagraph
 
+import java.util.concurrent.{Executors, ScheduledExecutorService, TimeUnit}
+import scala.concurrent.duration.*
+
 // ---------------------------------------------------------------------------
 // ZombieHunter — recovers sagas that died before completing compensation
 //
@@ -10,14 +13,57 @@ package sagagraph
 // Retry policy — one retry per CompensationFailed entry:
 //   - First failure  → CompensationFailed (will be retried next cycle)
 //   - Second failure → HumanIntervention  (compensation policy applied with no result)
+//
+// Can be used synchronously (recoverAll) or as an autonomous background
+// process (start/stop) using a ScheduledExecutorService — zero dependencies.
 // ---------------------------------------------------------------------------
-class ZombieHunter(store: WalStore, registry: CompensationRegistry):
+class ZombieHunter(
+    store: WalStore,
+    registry: CompensationRegistry,
+    interval: Duration = 60.seconds,
+    threshold: Duration = 60.seconds
+):
 
-  def recoverAll(olderThanMs: Long = 60_000L): List[ZombieHunter.Result] =
+  // -------------------------------------------------------------------------
+  // Configuration — fluent API
+  // -------------------------------------------------------------------------
+  def withInterval(d: Duration): ZombieHunter =
+    ZombieHunter(store, registry, d, threshold)
+  def withThreshold(d: Duration): ZombieHunter =
+    ZombieHunter(store, registry, interval, d)
+
+  // -------------------------------------------------------------------------
+  // Synchronous API — recover all zombies once
+  // -------------------------------------------------------------------------
+  def recoverAll(
+      olderThanMs: Long = threshold.toMillis
+  ): List[ZombieHunter.Result] =
     store.findZombies(olderThanMs) match
       case Left(err)      => List(ZombieHunter.Result.StoreError(err))
       case Right(zombies) => zombies.map(recover)
 
+  // -------------------------------------------------------------------------
+  // Autonomous background process
+  // Starts a ScheduledExecutorService that calls recoverAll periodically.
+  // Returns a ZombieHunterHandle to stop the process cleanly.
+  // -------------------------------------------------------------------------
+  def start(): ZombieHunter.Handle =
+    val executor = Executors.newSingleThreadScheduledExecutor(r =>
+      val t = Thread(r, "zombie-hunter")
+      t.setDaemon(true)
+      t
+    )
+    executor.scheduleWithFixedDelay(
+      () => recoverAll(),
+      interval.toMillis,
+      interval.toMillis,
+      TimeUnit.MILLISECONDS
+    )
+    ZombieHunter.Handle(executor)
+
+  // -------------------------------------------------------------------------
+  // Recovery logic
+  // -------------------------------------------------------------------------
   private def recover(sagaId: SagaId): ZombieHunter.Result =
     store.loadActionable(sagaId) match
       case Left(err) =>
@@ -42,14 +88,12 @@ class ZombieHunter(store: WalStore, registry: CompensationRegistry):
   ): Option[ZombieHunter.CompensationFailure] =
     entry.compensationRef match
       case None =>
-        // No ref — no compensation defined, mark as compensated and skip
         store.markCompensated(sagaId, entry.stepName)
         None
 
       case Some(ref) =>
         registry.resolve(ref) match
           case None =>
-            // Ref not found in registry — cannot compensate, human intervention required
             store.markHumanIntervention(sagaId, entry.stepName)
             Some(
               ZombieHunter.CompensationFailure(
@@ -66,10 +110,8 @@ class ZombieHunter(store: WalStore, registry: CompensationRegistry):
                 store.markCompensated(sagaId, entry.stepName)
                 None
               case Left(err) =>
-                // Check current status — if already CompensationFailed this is the retry
                 store.getStatus(sagaId, entry.stepName) match
                   case Right(WalEntry.Status.CompensationFailed) =>
-                    // Second failure — human intervention required
                     store.markHumanIntervention(sagaId, entry.stepName)
                     Some(
                       ZombieHunter.CompensationFailure(
@@ -80,7 +122,6 @@ class ZombieHunter(store: WalStore, registry: CompensationRegistry):
                       )
                     )
                   case _ =>
-                    // First failure — mark CompensationFailed, retry next cycle
                     store.markCompensationFailed(sagaId, entry.stepName)
                     Some(
                       ZombieHunter.CompensationFailure(
@@ -108,3 +149,17 @@ object ZombieHunter:
         failures: List[CompensationFailure]
     )
     case StoreError(cause: Throwable)
+
+  // -------------------------------------------------------------------------
+  // Handle — controls the autonomous background process
+  // -------------------------------------------------------------------------
+  class Handle(executor: ScheduledExecutorService):
+
+    // Stops after current cycle completes
+    def stop(): Unit =
+      executor.shutdown()
+      executor.awaitTermination(10, TimeUnit.SECONDS)
+
+    // Stops immediately — current cycle may be interrupted
+    def stopNow(): Unit =
+      executor.shutdownNow()
