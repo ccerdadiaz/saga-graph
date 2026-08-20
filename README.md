@@ -154,10 +154,27 @@ The Write-Ahead Log is the safety net:
 1. Compensation is persisted **before** the action executes
 2. If the process dies mid-saga, the WAL survives
 3. The ZombieHunter finds interrupted sagas and re-executes pending compensations
-4. Failed actions are marked `ActionFailed` — no compensation attempted
-5. Successful compensations are marked `Compensated`
-6. Compensations that fail are marked `CompensationFailed` — human intervention
-   required in current version
+
+**Step states:**
+
+| State | Meaning |
+|-------|---------|
+| `Registered` | Recorded in WAL, action not yet invoked |
+| `Running` | Engine has invoked the action |
+| `Done` | Action completed successfully |
+| `Failed` | Action failed — service guarantees internal consistency, no compensation needed |
+| `Compensated` | Compensation executed successfully |
+| `CompensationFailed` | Compensation failed — ZombieHunter will retry |
+| `HumanIntervention` | Compensation policy applied with no result — requires human action |
+
+**Saga states:**
+
+| State | Meaning |
+|-------|---------|
+| `Running` | Executing steps forward or compensating backward |
+| `Completed` | Happy path — all steps done |
+| `Compensated` | All steps successfully undone |
+| `Failed` | Could not compensate — system may be inconsistent, human intervention required |
 
 ---
 
@@ -172,14 +189,23 @@ val store = SqliteWalStore("./saga.db")
 
 // Your own — implement WalStore
 class MyStore extends WalStore:
+  // Steps
   def append(sagaId, entry)                    = ...
-  def loadPending(sagaId)                      = ...
+  def markRunning(sagaId, stepName)            = ...
+  def markDone(sagaId, stepName)               = ...
+  def markFailed(sagaId, stepName)             = ...
   def markCompensated(sagaId, stepName)        = ...
   def markCompensationFailed(sagaId, stepName) = ...
-  def markActionFailed(sagaId, stepName)       = ...
-  def complete(sagaId)                         = ...
-  def findZombies(olderThanMs)                 = ...
+  def markHumanIntervention(sagaId, stepName)  = ...
   def getStatus(sagaId, stepName)              = ...
+  def loadActionable(sagaId)                   = ...
+  // Sagas
+  def registerSaga(sagaId)                     = ...
+  def markSagaCompleted(sagaId)                = ...
+  def markSagaCompensating(sagaId)             = ...
+  def markSagaCompensated(sagaId)              = ...
+  def markSagaFailed(sagaId, cause)            = ...
+  def findZombies(olderThanMs)                 = ...
 ```
 
 ---
@@ -191,10 +217,43 @@ val registry = CompensationRegistry()
   .register("returnWeapon",  args => SmithyService.returnWeapon(...))
   .register("returnUniform", args => RagsAndStyleService.returnUniform(...))
 
-// Find sagas that started but never completed
-// and re-execute their pending compensations
+// Synchronous — recover once manually
 ZombieHunter(store, registry).recoverAll(olderThanMs = 60_000L)
+
+// Autonomous — runs as a background daemon thread
+val hunter = ZombieHunter(store, registry)
+  .withInterval(30.seconds)   // scan every 30 seconds
+  .withThreshold(60.seconds)  // consider zombie after 60 seconds
+  .start()                    // returns a Handle
+
+// ... application runs ...
+
+hunter.stop()  // waits for current cycle to complete
 ```
+
+The ZombieHunter retry policy is conservative by design:
+- First compensation failure → `CompensationFailed` (retried next cycle)
+- Second failure → `HumanIntervention` (saga marked `Failed`, no further retry)
+
+### GoblinZombieDemo
+
+```bash
+sbt "examples/runMain sagagraph.examples.goblin.GoblinZombieDemo"
+```
+
+```
+2026-08-20 12:24:22 [INFO ] [sbt-bg-threads-1] Simulating process crash for saga 30b74199
+2026-08-20 12:24:22 [INFO ] [sbt-bg-threads-1] Process crashed — saga 30b74199 is now a zombie
+2026-08-20 12:24:22 [INFO ] [sbt-bg-threads-1] Starting ZombieHunter — scanning every 2 seconds
+2026-08-20 12:24:24 [INFO ] [zombie-hunter]     [Recovery] Returning uniform to Rags & Style
+2026-08-20 12:24:24 [INFO ] [zombie-hunter]     [Recovery] Returning weapon to Smithy
+2026-08-20 12:24:24 [INFO ] [zombie-hunter]     [Recovery] Destroying measurement records
+
+  Saga 30b74199: ✓ FULLY RECOVERED — no actionable entries remain
+```
+
+The thread name `zombie-hunter` is visible in the log — distinguishable from
+saga execution threads at a glance.
 
 ---
 
@@ -216,6 +275,11 @@ Services start automatically on ports 8080-8084. While running:
 curl -X POST http://localhost:8081/weapon/acquire \
      -H "Content-Type: application/json" \
      -d '{"name":"Grishnakh","weightKg":67}'
+```
+
+### Zombie recovery demo
+```bash
+sbt "examples/runMain sagagraph.examples.goblin.GoblinZombieDemo"
 ```
 
 ## Transport agnostic
@@ -254,7 +318,9 @@ saga-graph/
 - the Two Generals problem, explicit concessions documented
 - Sovereign Compensation: saga_id as the only key that can trigger
   compensation — inspired by Rust ownership semantics
-- HTTP embedded — wrap example services in http4s for true microservice demo
+- store modularity — `store-sqlite` and future stores as proper
+  installable plugins
+- stress demo — correctness under load with ZombieHunter running concurrently
 
 ### Uncharted territory
 
@@ -265,27 +331,8 @@ interesting parts of the project.
   and compensation flows drawn from what actually happened, not what was planned
 - **happy-happy path** — demonstrate a resource returned by saga A being
   consumed by saga B with precise timing, proving compensation is not loss
-- **store modularity** — `store-sqlite` and future stores as proper
-  installable plugins
 
 ---
-
-## License
-
-Copyright 2026 Carlos Cerdá Díaz
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-
 
 ## Known limitations
 
@@ -310,6 +357,24 @@ compensated.
 Actions with no possible inverse (send email, burn log, publish event) should
 be modeled as BestEffort steps. saga-graph cannot compensate what cannot be
 undone — and neither can anything else.
+
+## License
+
+Copyright 2026 Carlos Cerdá Díaz
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+---
 
 ## Acknowledgements
 
