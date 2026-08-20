@@ -68,15 +68,18 @@ case class WalEntry(
     compensate: () => Either[Throwable, Unit],
     compensationRef: Option[String],
     compensationArgs: Option[String],
-    status: WalEntry.Status = WalEntry.Status.Pending
+    status: WalEntry.Status = WalEntry.Status.Registered
 )
 
 object WalEntry:
   enum Status:
-    case Pending
-    case ActionFailed
-    case Compensated
-    case CompensationFailed
+    case Registered // Action recorded, still not started
+    case Running // Action started
+    case Done // Action finished Ok
+    case Failed // Action failed
+    case Compensated // Compensation Ok
+    case CompensationFailed // Compensation failed, ZH will retry
+    case HumanIntervention // Not able to compensate.
 
 case class ParallelForkException(failures: List[(String, Throwable)])
     extends Exception(

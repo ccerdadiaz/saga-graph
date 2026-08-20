@@ -1,55 +1,77 @@
 package sagagraph
 
 // ---------------------------------------------------------------------------
-// WalStore — durable storage for saga compensation log
+// WalStore — durable storage for saga compensation mechanism.
 //
-// The motor writes to the WAL BEFORE executing each action.
-// On recovery, the motor reads the WAL and compensates pending steps.
+// The motor writes to the WAL BEFORE executing each step.
+// On recovery, the motor reads the WAL and compensates necessary steps.
 //
 // Implementations:
 //   - InMemoryWalStore  — for tests
-//   - FileWalStore      — for production PoC
+//   - SqliteWalStore    — reference implementation
 // ---------------------------------------------------------------------------
 trait WalStore:
 
-  // Append a compensation entry BEFORE the action executes
+  //
+  // Steps
+  //
+
+  // Registers an step (and its compensation) with Registered status
   def append(sagaId: SagaId, entry: WalEntry): Either[Throwable, Unit]
 
-  // Returns all Pending entries for the saga — order is not guaranteed
-  def loadPending(sagaId: SagaId): Either[Throwable, List[WalEntry]]
+  // Step Running
+  def markRunning(sagaId: SagaId, stepName: String): Either[Throwable, Unit]
 
-  // Mark an entry as compensated
+  // Step Done (successfully completed)
+  def markDone(sagaId: SagaId, stepName: String): Either[Throwable, Unit]
+
+  // Step Failed
+  def markFailed(sagaId: SagaId, stepName: String): Either[Throwable, Unit]
+
+  // Step Compensated (successfully)
   def markCompensated(sagaId: SagaId, stepName: String): Either[Throwable, Unit]
 
-  // Mark saga as completed
-  def complete(sagaId: SagaId): Either[Throwable, Unit]
-
-  // Find zombie sagas — started but not completed within threshold
-  def findZombies(olderThanMs: Long): Either[Throwable, List[SagaId]]
-
-  // Mark a WAL entry as permanently failed — requires human intervention
+  // Step's compensation Failed — eventually ZombieHunter will retry
   def markCompensationFailed(
       sagaId: SagaId,
       stepName: String
   ): Either[Throwable, Unit]
 
-  // Mark saga as compensated by zombie recovery
-  def markCompensated(sagaId: SagaId): Either[Throwable, Unit]
-
-  // Mark a WAL entry as failed — no compensation needed, service guarantees clean state
-  def markActionFailed(
+  // Marks the step as requiring human intervention
+  // TODO: Rename or mantain naming
+  // — compensation policy applied with no result
+  def markHumanIntervention(
       sagaId: SagaId,
       stepName: String
   ): Either[Throwable, Unit]
 
-  // Get the current status of a WAL entry
+  // Returns the current status of a step
   def getStatus(
       sagaId: SagaId,
       stepName: String
   ): Either[Throwable, WalEntry.Status]
 
-  // Mark the moment the action started executing
-  def markStarted(sagaId: SagaId, stepName: String): Either[Throwable, Unit]
+  // Returns all actionable entries — Registered, CompensationFailed
+  def loadActionable(sagaId: SagaId): Either[Throwable, List[WalEntry]]
 
-  // Mark the moment the action finished executing (success or failure)
-  def markFinished(sagaId: SagaId, stepName: String): Either[Throwable, Unit]
+  //
+  // Sagas
+  //
+
+  // Registers a new saga with Running status
+  def registerSaga(sagaId: SagaId): Either[Throwable, Unit]
+
+  // Marks the saga as Completed — happy path reached the end
+  def markSagaCompleted(sagaId: SagaId): Either[Throwable, Unit]
+
+  // Marks the saga as Compensating — more Done steps should be compensated
+  def markSagaCompensating(sagaId: SagaId): Either[Throwable, Unit]
+
+  // Marks the saga as Compensated — all actions successfully undone
+  def markSagaCompensated(sagaId: SagaId): Either[Throwable, Unit]
+
+  // Marks the saga as Failed — human intervention required
+  def markSagaFailed(sagaId: SagaId, cause: Throwable): Either[Throwable, Unit]
+
+  // Finds zombie sagas — Running but not completed within threshold
+  def findZombies(olderThanMs: Long): Either[Throwable, List[SagaId]]

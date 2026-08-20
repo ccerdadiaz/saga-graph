@@ -7,11 +7,13 @@ import scala.concurrent.duration.*
 // SagaEngine — executes a saga graph, manages WAL and compensation
 //
 // Responsibilities:
-//   1. Execute each element in order (Single or Parallel)
-//   2. Register compensation in WAL BEFORE executing action
-//   3. Record started_at and finished_at for each action
-//   4. On failure: compensate in reverse order (LIFO)
-//   5. Respect step type (Mandatory / Optional / BestEffort)
+//   1. Register the saga in the WAL with Running status
+//   2. Execute each element in order (Single or Parallel)
+//   3. Register compensation in WAL BEFORE executing action
+//   4. Record Running and Done status for each step
+//   5. On failure: compensate in reverse order (LIFO)
+//   6. Respect step type (Mandatory / Optional / BestEffort)
+//   7. Mark saga terminal state (Completed / Compensated / Failed)
 // ---------------------------------------------------------------------------
 class SagaEngine(
     sagaId: SagaId,
@@ -22,11 +24,12 @@ class SagaEngine(
 
   def run(elements: List[SagaElement]): SagaResult =
     SagaContext.run(sagaId):
-      val result = execute(elements, wal = List.empty)
-      result
+      store.registerSaga(sagaId)
+      execute(elements, wal = List.empty)
 
   // -------------------------------------------------------------------------
-  // Main recursive loop
+  // Recursive traversal — executes each SagaElement in order
+  // Depth is bounded by the number of steps defined at saga construction time
   // -------------------------------------------------------------------------
   private def execute(
       remaining: List[SagaElement],
@@ -34,7 +37,7 @@ class SagaEngine(
   ): SagaResult =
     remaining match
       case Nil =>
-        store.complete(sagaId)
+        store.markSagaCompleted(sagaId)
         SagaResult.Completed
 
       case head :: tail =>
@@ -43,14 +46,18 @@ class SagaEngine(
             runStep(step, wal) match
               case Right(updatedWal) => execute(tail, updatedWal)
               case Left((error, updatedWal)) =>
+                store.markSagaCompensating(sagaId)
                 compensate(updatedWal)
+                store.markSagaCompensated(sagaId)
                 SagaResult.Failed(error)
 
           case SagaElement.Parallel(steps) =>
             runParallel(steps, wal) match
               case Right(updatedWal) => execute(tail, updatedWal)
               case Left((error, updatedWal)) =>
+                store.markSagaCompensating(sagaId)
                 compensate(updatedWal)
+                store.markSagaCompensated(sagaId)
                 SagaResult.Failed(error)
 
   // -------------------------------------------------------------------------
@@ -63,7 +70,8 @@ class SagaEngine(
     step match
 
       case s: BestEffortStep =>
-        s.run() // failure silently ignored, no WAL entry
+        // No WAL entry — failure silently ignored
+        s.run()
         Right(wal)
 
       case s: OptionalStep =>
@@ -75,9 +83,10 @@ class SagaEngine(
         )
         val updatedWal = entry :: wal
         store.append(sagaId, entry)
-        store.markStarted(sagaId, s.name)
-        s.run()
-        store.markFinished(sagaId, s.name)
+        store.markRunning(sagaId, s.name)
+        s.run() match
+          case Right(_) => store.markDone(sagaId, s.name)
+          case Left(_)  => store.markFailed(sagaId, s.name)
         Right(updatedWal)
 
       case s: MandatoryStep =>
@@ -89,12 +98,14 @@ class SagaEngine(
         )
         val updatedWal = entry :: wal
         store.append(sagaId, entry)
-        store.markStarted(sagaId, s.name)
-        val result = s.run()
-        store.markFinished(sagaId, s.name)
-        result match
-          case Right(_)  => Right(updatedWal)
-          case Left(err) => Left((err, updatedWal))
+        store.markRunning(sagaId, s.name)
+        s.run() match
+          case Right(_) =>
+            store.markDone(sagaId, s.name)
+            Right(updatedWal)
+          case Left(err) =>
+            store.markFailed(sagaId, s.name)
+            Left((err, updatedWal))
 
   // -------------------------------------------------------------------------
   // Execute parallel steps — all-or-nothing
@@ -118,14 +129,16 @@ class SagaEngine(
     entries.foreach(store.append(sagaId, _))
     val forkWal = entries.reverse ++ wal
 
-    // Launch all steps concurrently — record timing for parallelism evidence
+    // Launch all steps concurrently
     val futures = steps.map(s =>
       Future {
         // Re-bind sagaId — fork threads do not inherit the parent ScopedValue scope
         SagaContext.run(sagaId):
-          store.markStarted(sagaId, s.name)
+          store.markRunning(sagaId, s.name)
           val result = s.name -> s.run()
-          store.markFinished(sagaId, s.name)
+          result match
+            case (_, Right(_)) => store.markDone(sagaId, s.name)
+            case (_, Left(_))  => store.markFailed(sagaId, s.name)
           result
       }
     )
@@ -135,14 +148,10 @@ class SagaEngine(
     val failures = results.collect { case (name, Left(err)) => name -> err }
 
     if failures.isEmpty then Right(forkWal)
-    else
-      failures.foreach { case (name, _) =>
-        store.markActionFailed(sagaId, name)
-      }
-      Left((ParallelForkException(failures), forkWal))
+    else Left((ParallelForkException(failures), forkWal))
 
   // -------------------------------------------------------------------------
-  // Compensate in LIFO order — skip ActionFailed entries
+  // Compensate in LIFO order — skip Failed entries (action never succeeded)
   // -------------------------------------------------------------------------
   private def compensate(wal: List[WalEntry]): Unit =
     wal.foreach { entry =>
@@ -150,7 +159,7 @@ class SagaEngine(
         case Left(_) =>
           // Cannot determine status — compensate defensively
           runCompensation(entry)
-        case Right(WalEntry.Status.ActionFailed) =>
+        case Right(WalEntry.Status.Failed) =>
           // Action failed — service guarantees clean state, nothing to compensate
           ()
         case Right(_) =>

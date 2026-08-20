@@ -10,9 +10,9 @@ class ZombieHunterSpec extends AnyFlatSpec with Matchers:
   def store(): InMemoryWalStore = InMemoryWalStore()
 
   def entry(name: String, ref: String) = WalEntry(
-    stepName = name,
-    compensate = () => Right(()),
-    compensationRef = Some(ref),
+    stepName         = name,
+    compensate       = () => Right(()),
+    compensationRef  = Some(ref),
     compensationArgs = Some(s"""{"step":"$name"}""")
   )
 
@@ -20,7 +20,7 @@ class ZombieHunterSpec extends AnyFlatSpec with Matchers:
   // TEST 1: All compensations succeed — saga marked Recovered
   // -------------------------------------------------------------------------
   "ZombieHunter" should "recover a zombie saga when all compensations succeed" in:
-    val s = store()
+    val s      = store()
     val sagaId = SagaId.generate()
     val compensated = scala.collection.mutable.ListBuffer.empty[String]
 
@@ -44,7 +44,7 @@ class ZombieHunterSpec extends AnyFlatSpec with Matchers:
   // TEST 2: One compensation fails — saga PartiallyRecovered
   // -------------------------------------------------------------------------
   it should "report PartiallyRecovered when a compensation handler fails" in:
-    val s = store()
+    val s      = store()
     val sagaId = SagaId.generate()
 
     s.append(sagaId, entry("step1", "rollbackStep1"))
@@ -53,10 +53,7 @@ class ZombieHunterSpec extends AnyFlatSpec with Matchers:
 
     val registry = CompensationRegistry()
       .register("rollbackStep1", _ => Right(()))
-      .register(
-        "rollbackStep2",
-        _ => Left(RuntimeException("service unavailable"))
-      )
+      .register("rollbackStep2", _ => Left(RuntimeException("service unavailable")))
 
     val results = ZombieHunter(s, registry).recoverAll(50)
 
@@ -64,10 +61,10 @@ class ZombieHunterSpec extends AnyFlatSpec with Matchers:
     results.head shouldBe a[ZombieHunter.Result.PartiallyRecovered]
 
   // -------------------------------------------------------------------------
-  // TEST 3: Missing handler in registry — PartiallyRecovered
+  // TEST 3: Missing handler in registry — HumanInterventionRequired
   // -------------------------------------------------------------------------
-  it should "report PartiallyRecovered when handler is missing from registry" in:
-    val s = store()
+  it should "report HumanInterventionRequired when handler is missing from registry" in:
+    val s      = store()
     val sagaId = SagaId.generate()
 
     s.append(sagaId, entry("step1", "unknownRef"))
@@ -78,19 +75,19 @@ class ZombieHunterSpec extends AnyFlatSpec with Matchers:
     val results = ZombieHunter(s, registry).recoverAll(50)
 
     results should have length 1
-    results.head shouldBe a[ZombieHunter.Result.PartiallyRecovered]
+    results.head shouldBe a[ZombieHunter.Result.HumanInterventionRequired]
 
   // -------------------------------------------------------------------------
   // TEST 4: No zombies — recoverAll returns empty list
   // -------------------------------------------------------------------------
   it should "return empty list when no zombies exist" in:
-    val s = store()
+    val s      = store()
     val sagaId = SagaId.generate()
 
     s.append(sagaId, entry("step1", "rollbackStep1"))
-    s.complete(sagaId)
+    s.markSagaCompleted(sagaId)
 
     val registry = CompensationRegistry()
-    val results = ZombieHunter(s, registry).recoverAll(50)
+    val results  = ZombieHunter(s, registry).recoverAll(50)
 
     results shouldBe List.empty

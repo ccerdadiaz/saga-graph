@@ -24,44 +24,45 @@ class SqliteWalStoreSpec
     store.close()
 
   val dummyEntry = WalEntry(
-    stepName = "LogicalReservation",
-    compensate = () => Right(()),
-    compensationRef = Some("deleteReservation"),
+    stepName         = "LogicalReservation",
+    compensate       = () => Right(()),
+    compensationRef  = Some("deleteReservation"),
     compensationArgs = Some("""{"id":1234}""")
   )
 
   // -------------------------------------------------------------------------
-  // TEST 1: append creates saga and entry in Pending state
+  // TEST 1: append creates saga and entry in Registered state
   // -------------------------------------------------------------------------
-  "SqliteWalStore" should "create saga and Pending entry on append" in:
+  "SqliteWalStore" should "create saga and Registered entry on append" in:
     val sagaId = SagaId.generate()
     store.append(sagaId, dummyEntry).isRight shouldBe true
-    val pending = store.loadPending(sagaId)
-    pending.isRight shouldBe true
-    pending.toOption.get.map(_.stepName) shouldBe List("LogicalReservation")
+    val actionable = store.loadActionable(sagaId)
+    actionable.isRight shouldBe true
+    actionable.toOption.get.map(_.stepName) shouldBe List("LogicalReservation")
 
   // -------------------------------------------------------------------------
-  // TEST 2: markCompensated removes entry from pending
+  // TEST 2: markCompensated removes entry from actionable
   // -------------------------------------------------------------------------
-  it should "remove entry from pending after markCompensated" in:
+  it should "remove entry from actionable after markCompensated" in:
     val sagaId = SagaId.generate()
     store.append(sagaId, dummyEntry)
     store.markCompensated(sagaId, "LogicalReservation").isRight shouldBe true
-    store.loadPending(sagaId).toOption.get shouldBe List.empty
+    store.loadActionable(sagaId).toOption.get shouldBe List.empty
 
   // -------------------------------------------------------------------------
-  // TEST 3: complete marks saga as finished
+  // TEST 3: markSagaCompleted marks saga as finished
   // -------------------------------------------------------------------------
   it should "mark saga as completed" in:
     val sagaId = SagaId.generate()
-    store.append(sagaId, dummyEntry)
-    store.complete(sagaId).isRight shouldBe true
+    store.registerSaga(sagaId)
+    store.markSagaCompleted(sagaId).isRight shouldBe true
 
   // -------------------------------------------------------------------------
   // TEST 4: findZombies detects Running sagas older than threshold
   // -------------------------------------------------------------------------
   it should "detect Running sagas older than threshold as zombies" in:
     val sagaId = SagaId.generate()
+    store.registerSaga(sagaId)
     store.append(sagaId, dummyEntry)
     Thread.sleep(100)
     val zombies = store.findZombies(50)
@@ -73,20 +74,19 @@ class SqliteWalStoreSpec
   // -------------------------------------------------------------------------
   it should "not include completed sagas in zombie list" in:
     val sagaId = SagaId.generate()
+    store.registerSaga(sagaId)
     store.append(sagaId, dummyEntry)
-    store.complete(sagaId)
+    store.markSagaCompleted(sagaId)
     Thread.sleep(100)
     store.findZombies(50).toOption.get shouldBe List.empty
 
   // -------------------------------------------------------------------------
-  // TEST 6: loadPending returns entries in LIFO order
+  // TEST 6: loadActionable returns all Registered entries
   // -------------------------------------------------------------------------
-  it should "return all pending entries regardless of order" in:
+  it should "return all actionable entries regardless of order" in:
     val sagaId = SagaId.generate()
     val entry2 = dummyEntry.copy(stepName = "PhysicalReservation")
     store.append(sagaId, dummyEntry)
     store.append(sagaId, entry2)
-    val pending = store.loadPending(sagaId).toOption.get
-    pending.map(
-      _.stepName
-    ) should contain allOf ("LogicalReservation", "PhysicalReservation")
+    val actionable = store.loadActionable(sagaId).toOption.get
+    actionable.map(_.stepName) should contain allOf ("LogicalReservation", "PhysicalReservation")

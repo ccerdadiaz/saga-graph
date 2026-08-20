@@ -70,7 +70,7 @@ class SagaEngineSpec extends AnyFlatSpec with Matchers:
 
     result shouldBe a[SagaResult.Failed]
     executed.toList shouldBe List("step1", "step2")
-    compensated.toList shouldBe List("step2", "step1")
+    compensated.toList shouldBe List("step1") // step2 falló — no se compensa
 
   // -------------------------------------------------------------------------
   // TEST 3: Optional step fails — saga continues

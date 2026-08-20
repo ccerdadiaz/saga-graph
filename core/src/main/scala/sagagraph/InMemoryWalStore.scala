@@ -6,14 +6,18 @@ class InMemoryWalStore extends WalStore:
 
   private case class StoredEntry(
       entry: WalEntry,
-      @volatile var status: WalEntry.Status = WalEntry.Status.Pending,
+      @volatile var status: WalEntry.Status = WalEntry.Status.Registered,
       @volatile var startedAt: Option[Long] = None,
       @volatile var finishedAt: Option[Long] = None
   )
 
   private val store = mutable.Map.empty[SagaId, mutable.ListBuffer[StoredEntry]]
-  private val completed = mutable.Set.empty[SagaId]
+  private val sagas = mutable.Map.empty[SagaId, SagaStatus]
   private val timestamps = mutable.Map.empty[SagaId, Long]
+
+  // -------------------------------------------------------------------------
+  // Steps
+  // -------------------------------------------------------------------------
 
   def append(sagaId: SagaId, entry: WalEntry): Either[Throwable, Unit] =
     synchronized:
@@ -25,15 +29,32 @@ class InMemoryWalStore extends WalStore:
         Right(())
       catch case e: Throwable => Left(e)
 
-  def loadPending(sagaId: SagaId): Either[Throwable, List[WalEntry]] =
+  def markRunning(sagaId: SagaId, stepName: String): Either[Throwable, Unit] =
     synchronized:
-      Right(
-        store
-          .getOrElse(sagaId, mutable.ListBuffer.empty)
-          .filter(_.status == WalEntry.Status.Pending)
-          .map(_.entry)
-          .toList
-      )
+      findEntry(sagaId, stepName) match
+        case None => Left(Exception(s"[$sagaId] step '$stepName' not found"))
+        case Some(e) =>
+          e.status = WalEntry.Status.Running
+          e.startedAt = Some(System.currentTimeMillis())
+          Right(())
+
+  def markDone(sagaId: SagaId, stepName: String): Either[Throwable, Unit] =
+    synchronized:
+      findEntry(sagaId, stepName) match
+        case None => Left(Exception(s"[$sagaId] step '$stepName' not found"))
+        case Some(e) =>
+          e.status = WalEntry.Status.Done
+          e.finishedAt = Some(System.currentTimeMillis())
+          Right(())
+
+  def markFailed(sagaId: SagaId, stepName: String): Either[Throwable, Unit] =
+    synchronized:
+      findEntry(sagaId, stepName) match
+        case None => Left(Exception(s"[$sagaId] step '$stepName' not found"))
+        case Some(e) =>
+          e.status = WalEntry.Status.Failed
+          e.finishedAt = Some(System.currentTimeMillis())
+          Right(())
 
   def markCompensated(
       sagaId: SagaId,
@@ -53,34 +74,14 @@ class InMemoryWalStore extends WalStore:
         case None    => Left(Exception(s"[$sagaId] step '$stepName' not found"))
         case Some(e) => e.status = WalEntry.Status.CompensationFailed; Right(())
 
-  def markActionFailed(
+  def markHumanIntervention(
       sagaId: SagaId,
       stepName: String
   ): Either[Throwable, Unit] =
     synchronized:
       findEntry(sagaId, stepName) match
         case None    => Left(Exception(s"[$sagaId] step '$stepName' not found"))
-        case Some(e) => e.status = WalEntry.Status.ActionFailed; Right(())
-
-  def markCompensated(sagaId: SagaId): Either[Throwable, Unit] =
-    synchronized:
-      completed += sagaId
-      Right(())
-
-  def complete(sagaId: SagaId): Either[Throwable, Unit] =
-    synchronized:
-      completed += sagaId
-      Right(())
-
-  def findZombies(olderThanMs: Long): Either[Throwable, List[SagaId]] =
-    synchronized:
-      val threshold = System.currentTimeMillis() - olderThanMs
-      Right(
-        timestamps
-          .filterNot { case (id, _) => completed.contains(id) }
-          .collect { case (id, ts) if ts < threshold => id }
-          .toList
-      )
+        case Some(e) => e.status = WalEntry.Status.HumanIntervention; Right(())
 
   def getStatus(
       sagaId: SagaId,
@@ -91,19 +92,75 @@ class InMemoryWalStore extends WalStore:
         case None    => Left(Exception(s"[$sagaId] step '$stepName' not found"))
         case Some(e) => Right(e.status)
 
+  // Returns Registered and CompensationFailed entries — actionable by ZombieHunter
+  def loadActionable(sagaId: SagaId): Either[Throwable, List[WalEntry]] =
+    synchronized:
+      Right(
+        store
+          .getOrElse(sagaId, mutable.ListBuffer.empty)
+          .filter(e =>
+            e.status == WalEntry.Status.Registered ||
+              e.status == WalEntry.Status.CompensationFailed
+          )
+          .map(_.entry)
+          .toList
+      )
+
+  // -------------------------------------------------------------------------
+  // Sagas
+  // -------------------------------------------------------------------------
+
+  def registerSaga(sagaId: SagaId): Either[Throwable, Unit] =
+    synchronized:
+      sagas(sagaId) = SagaStatus.Running
+      timestamps.getOrElseUpdate(sagaId, System.currentTimeMillis())
+      Right(())
+
+  def markSagaCompleted(sagaId: SagaId): Either[Throwable, Unit] =
+    synchronized:
+      sagas(sagaId) = SagaStatus.Completed
+      Right(())
+
+  def markSagaCompensating(sagaId: SagaId): Either[Throwable, Unit] =
+    synchronized:
+      sagas(sagaId) = SagaStatus.Compensating
+      Right(())
+
+  def markSagaCompensated(sagaId: SagaId): Either[Throwable, Unit] =
+    synchronized:
+      sagas(sagaId) = SagaStatus.Compensated
+      Right(())
+
+  def markSagaFailed(
+      sagaId: SagaId,
+      cause: Throwable
+  ): Either[Throwable, Unit] =
+    synchronized:
+      sagas(sagaId) = SagaStatus.Failed(cause)
+      Right(())
+
+  def findZombies(olderThanMs: Long): Either[Throwable, List[SagaId]] =
+    synchronized:
+      val threshold = System.currentTimeMillis() - olderThanMs
+      val terminalStates = Set(SagaStatus.Completed, SagaStatus.Compensated)
+      Right(
+        timestamps
+          .filter { case (id, ts) =>
+            ts < threshold &&
+            !sagas.get(id).exists {
+              case SagaStatus.Completed   => true
+              case SagaStatus.Compensated => true
+              case SagaStatus.Failed(_)   => true
+              case _                      => false
+            }
+          }
+          .keys
+          .toList
+      )
+
+  // -------------------------------------------------------------------------
+  // Internal helpers
+  // -------------------------------------------------------------------------
+
   private def findEntry(sagaId: SagaId, stepName: String): Option[StoredEntry] =
     store.get(sagaId).flatMap(_.find(_.entry.stepName == stepName))
-
-  def markStarted(sagaId: SagaId, stepName: String): Either[Throwable, Unit] =
-    synchronized:
-      findEntry(sagaId, stepName) match
-        case None => Left(Exception(s"[$sagaId] step '$stepName' not found"))
-        case Some(e) =>
-          e.startedAt = Some(System.currentTimeMillis()); Right(())
-
-  def markFinished(sagaId: SagaId, stepName: String): Either[Throwable, Unit] =
-    synchronized:
-      findEntry(sagaId, stepName) match
-        case None => Left(Exception(s"[$sagaId] step '$stepName' not found"))
-        case Some(e) =>
-          e.finishedAt = Some(System.currentTimeMillis()); Right(())
