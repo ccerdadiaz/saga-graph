@@ -11,14 +11,22 @@ import scala.concurrent.duration.*
 //   2. Execute each element in order (Single or Parallel)
 //   3. Register compensation in WAL BEFORE executing action
 //   4. Record Running and Done status for each step
-//   5. On failure: compensate in reverse order (LIFO)
+//   5. On failure: compensate in reverse order (LIFO) until all Done
+//      steps are Compensated OR until a compensation fails
 //   6. Respect step type (Mandatory / Optional / BestEffort)
-//   7. Mark saga terminal state (Completed / Compensated / Failed)
+//   7. Mark saga terminal state:
+//      - All compensated → Compensated
+//      - Compensation failed → Compensating (ZombieHunter picks it up)
+//
+// Compensation policy:
+//   The engine compensates in LIFO order and STOPS on first failure.
+//   It does NOT retry — ZombieHunter is responsible for retrying failed
+//   compensations and continuing the LIFO from where the engine stopped.
 // ---------------------------------------------------------------------------
 class SagaEngine(
     sagaId: SagaId,
-    store: WalStore,
-    ec: ExecutionContext,
+    store:  WalStore,
+    ec:     ExecutionContext,
     logger: SagaLogger = SagaLogger.noOp
 ):
 
@@ -33,7 +41,7 @@ class SagaEngine(
   // -------------------------------------------------------------------------
   private def execute(
       remaining: List[SagaElement],
-      wal: List[WalEntry]
+      wal:       List[WalEntry]
   ): SagaResult =
     remaining match
       case Nil =>
@@ -47,8 +55,12 @@ class SagaEngine(
               case Right(updatedWal) => execute(tail, updatedWal)
               case Left((error, updatedWal)) =>
                 store.markSagaCompensating(sagaId)
-                compensate(updatedWal)
-                store.markSagaCompensated(sagaId)
+                val stopped = compensate(updatedWal)
+                if stopped then
+                  // Compensation stopped — ZombieHunter will continue LIFO
+                  logger.warn(s"Compensation stopped at a failed step — ZombieHunter will retry")
+                else
+                  store.markSagaCompensated(sagaId)
                 SagaResult.Failed(error)
 
           case SagaElement.Parallel(steps) =>
@@ -56,8 +68,11 @@ class SagaEngine(
               case Right(updatedWal) => execute(tail, updatedWal)
               case Left((error, updatedWal)) =>
                 store.markSagaCompensating(sagaId)
-                compensate(updatedWal)
-                store.markSagaCompensated(sagaId)
+                val stopped = compensate(updatedWal)
+                if stopped then
+                  logger.warn(s"Compensation stopped at a failed step — ZombieHunter will retry")
+                else
+                  store.markSagaCompensated(sagaId)
                 SagaResult.Failed(error)
 
   // -------------------------------------------------------------------------
@@ -65,7 +80,7 @@ class SagaEngine(
   // -------------------------------------------------------------------------
   private def runStep(
       step: SagaStep,
-      wal: List[WalEntry]
+      wal:  List[WalEntry]
   ): Either[(Throwable, List[WalEntry]), List[WalEntry]] =
     step match
 
@@ -76,9 +91,9 @@ class SagaEngine(
 
       case s: OptionalStep =>
         val entry = WalEntry(
-          stepName = s.name,
-          compensate = s.compensate,
-          compensationRef = s.compensationRef,
+          stepName         = s.name,
+          compensate       = s.compensate,
+          compensationRef  = s.compensationRef,
           compensationArgs = s.compensationArgs
         )
         val updatedWal = entry :: wal
@@ -91,9 +106,9 @@ class SagaEngine(
 
       case s: MandatoryStep =>
         val entry = WalEntry(
-          stepName = s.name,
-          compensate = s.compensate,
-          compensationRef = s.compensationRef,
+          stepName         = s.name,
+          compensate       = s.compensate,
+          compensationRef  = s.compensationRef,
           compensationArgs = s.compensationArgs
         )
         val updatedWal = entry :: wal
@@ -113,16 +128,16 @@ class SagaEngine(
   // -------------------------------------------------------------------------
   private def runParallel(
       steps: List[MandatoryStep],
-      wal: List[WalEntry]
+      wal:   List[WalEntry]
   ): Either[(Throwable, List[WalEntry]), List[WalEntry]] =
 
     given ExecutionContext = ec
 
     val entries = steps.map(s =>
       WalEntry(
-        stepName = s.name,
-        compensate = s.compensate,
-        compensationRef = s.compensationRef,
+        stepName         = s.name,
+        compensate       = s.compensate,
+        compensationRef  = s.compensationRef,
         compensationArgs = s.compensationArgs
       )
     )
@@ -144,34 +159,35 @@ class SagaEngine(
     )
     val results = Await.result(Future.sequence(futures), 30.seconds)
 
-    // Collect ALL failures — not just the first one
     val failures = results.collect { case (name, Left(err)) => name -> err }
 
     if failures.isEmpty then Right(forkWal)
     else Left((ParallelForkException(failures), forkWal))
 
   // -------------------------------------------------------------------------
-  // Compensate in LIFO order — skip Failed entries (action never succeeded)
+  // Compensate in LIFO order — STOPS on first failure
+  //
+  // Returns true if compensation stopped (a step failed to compensate)
+  // Returns false if all steps were compensated successfully
+  //
+  // Steps in Failed status are skipped — service guarantees clean state.
+  // Steps in Registered status are skipped — action was never executed.
   // -------------------------------------------------------------------------
-  private def compensate(wal: List[WalEntry]): Unit =
-    wal.foreach { entry =>
+  private def compensate(wal: List[WalEntry]): Boolean =
+    var stopped = false
+    val iter    = wal.iterator
+    while iter.hasNext && !stopped do
+      val entry = iter.next()
       store.getStatus(sagaId, entry.stepName) match
-        case Left(_) =>
-          // Cannot determine status — compensate defensively
-          runCompensation(entry)
-        case Right(WalEntry.Status.Failed) =>
-          // Action failed — service guarantees clean state, nothing to compensate
-          ()
-        case Right(_) =>
-          runCompensation(entry)
-    }
-
-  private def runCompensation(entry: WalEntry): Unit =
-    entry.compensate() match
-      case Right(_) =>
-        store.markCompensated(sagaId, entry.stepName)
-      case Left(err) =>
-        store.markCompensationFailed(sagaId, entry.stepName)
-        logger.warn(
-          s"Compensation failed for '${entry.stepName}': ${err.getMessage}"
-        )
+        case Right(WalEntry.Status.Failed)     => () // skip — service guarantees clean state
+        case Right(WalEntry.Status.Registered) => () // skip — action was never executed
+        case Right(WalEntry.Status.Compensated) => () // skip — already compensated
+        case _ =>
+          entry.compensate() match
+            case Right(_) =>
+              store.markCompensated(sagaId, entry.stepName)
+            case Left(err) =>
+              store.markCompensationFailed(sagaId, entry.stepName)
+              logger.warn(s"Compensation failed for '${entry.stepName}' — stopping LIFO, ZombieHunter will retry: ${err.getMessage}")
+              stopped = true
+    stopped

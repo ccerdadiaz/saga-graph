@@ -50,7 +50,7 @@ class SagaEngineIntegrationSpec
       .run(s)
 
     result shouldBe SagaResult.Completed
-    s.loadActionable(SagaId("")).toOption.get shouldBe List.empty
+    s.loadCompensationFailed(SagaId("")).toOption.get shouldBe List.empty
     s.findZombies(0).toOption.get shouldBe List.empty
 
   // -------------------------------------------------------------------------
@@ -80,10 +80,10 @@ class SagaEngineIntegrationSpec
     val compensated = scala.collection.mutable.ListBuffer.empty[String]
     val s = store()
 
-    val (n1, a1, c1) = success("step1",  executed, compensated)
-    val (n2, a2, c2) = success("par-A",  executed, compensated)
-    val (n3, a3, c3) = failing("par-B",  executed, compensated)
-    val (n4, a4, c4) = success("par-C",  executed, compensated)
+    val (n1, a1, c1) = success("step1", executed, compensated)
+    val (n2, a2, c2) = success("par-A", executed, compensated)
+    val (n3, a3, c3) = failing("par-B", executed, compensated)
+    val (n4, a4, c4) = success("par-C", executed, compensated)
 
     val result = SagaGraph()
       .step(n1, a1, c1)

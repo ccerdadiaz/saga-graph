@@ -135,7 +135,7 @@ SagaGraph()
 ## Step semantics
 
 | Type | On failure | Compensation |
-|------|-----------|--------------|
+|------|-----------|--------------| 
 | `step` — Mandatory | Saga fails, compensate all previous steps | Required |
 | `parallel` — All-or-nothing fork | Saga fails if any branch fails, compensate all successful branches | Required per branch |
 | `optional` | Saga continues | Required |
@@ -153,7 +153,7 @@ The Write-Ahead Log is the safety net:
 
 1. Compensation is persisted **before** the action executes
 2. If the process dies mid-saga, the WAL survives
-3. The ZombieHunter finds interrupted sagas and re-executes pending compensations
+3. The ZombieHunter finds blocked sagas and resumes compensation from where the engine stopped
 
 **Step states:**
 
@@ -165,48 +165,48 @@ The Write-Ahead Log is the safety net:
 | `Failed` | Action failed — service guarantees internal consistency, no compensation needed |
 | `Compensated` | Compensation executed successfully |
 | `CompensationFailed` | Compensation failed — ZombieHunter will retry |
-| `HumanIntervention` | Compensation policy applied with no result — requires human action |
+| `HumanIntervention` | Compensation policy exhausted — requires human action |
 
 **Saga states:**
 
 | State | Meaning |
 |-------|---------|
-| `Running` | Executing steps forward or compensating backward |
+| `Running` | Executing steps forward |
+| `Compensating` | Compensation in progress — either by the engine or blocked waiting for ZombieHunter |
 | `Completed` | Happy path — all steps done |
 | `Compensated` | All steps successfully undone |
-| `Failed` | Could not compensate — system may be inconsistent, human intervention required |
+| `Failed` | Compensation could not complete — human intervention required |
 
 ---
 
-## Pluggable persistence
+## Engine and ZombieHunter — separation of responsibilities
 
-```scala
-// In-memory — for tests
-val store = InMemoryWalStore()
+The engine and the ZombieHunter are independent agents with distinct roles.
+Understanding this separation is important when designing compensations.
 
-// SQLite — reference implementation, no server required
-val store = SqliteWalStore("./saga.db")
+**The engine** moves in one direction at a time. On the happy path it advances
+step by step. On failure it compensates in LIFO order. If a compensation
+fails, the engine stops immediately — it does not retry, it does not skip,
+it does not continue. The saga stays in `Compensating` with the failed step
+in `CompensationFailed`. The remaining `Done` steps are left untouched.
 
-// Your own — implement WalStore
-class MyStore extends WalStore:
-  // Steps
-  def append(sagaId, entry)                    = ...
-  def markRunning(sagaId, stepName)            = ...
-  def markDone(sagaId, stepName)               = ...
-  def markFailed(sagaId, stepName)             = ...
-  def markCompensated(sagaId, stepName)        = ...
-  def markCompensationFailed(sagaId, stepName) = ...
-  def markHumanIntervention(sagaId, stepName)  = ...
-  def getStatus(sagaId, stepName)              = ...
-  def loadActionable(sagaId)                   = ...
-  // Sagas
-  def registerSaga(sagaId)                     = ...
-  def markSagaCompleted(sagaId)                = ...
-  def markSagaCompensating(sagaId)             = ...
-  def markSagaCompensated(sagaId)              = ...
-  def markSagaFailed(sagaId, cause)            = ...
-  def findZombies(olderThanMs)                 = ...
-```
+**The ZombieHunter** is the recovery agent. It finds sagas in `Compensating`
+state, retries the `CompensationFailed` steps, and if successful, continues
+the LIFO from where the engine stopped — compensating the remaining `Done`
+steps in order. If the retry fails again after the configured maximum attempts,
+the step is marked `HumanIntervention` and the saga is marked `Failed`.
+
+This separation has a concrete consequence for service design:
+
+**Compensations must be idempotent.** The ZombieHunter may call a compensation
+that was already attempted by the engine. The service must handle duplicate
+compensation requests without side effects — returning the same weapon twice
+must be safe. This is the standard requirement for any at-least-once delivery
+system, and saga-graph is no exception.
+
+**Compensations must be finalista** (eventually terminating with a definitive
+result). A compensation that hangs indefinitely will block the ZombieHunter
+cycle. Services should implement timeouts on their compensation endpoints.
 
 ---
 
@@ -224,6 +224,8 @@ ZombieHunter(store, registry).recoverAll(olderThanMs = 60_000L)
 val hunter = ZombieHunter(store, registry)
   .withInterval(30.seconds)   // scan every 30 seconds
   .withThreshold(60.seconds)  // consider zombie after 60 seconds
+  .withMaxAttempts(2)         // escalate to HumanIntervention after 2 failures
+  .withLogger(myLogger)       // optional — noOp by default
   .start()                    // returns a Handle
 
 // ... application runs ...
@@ -231,9 +233,13 @@ val hunter = ZombieHunter(store, registry)
 hunter.stop()  // waits for current cycle to complete
 ```
 
-The ZombieHunter retry policy is conservative by design:
-- First compensation failure → `CompensationFailed` (retried next cycle)
-- Second failure → `HumanIntervention` (saga marked `Failed`, no further retry)
+The ZombieHunter retry policy per step:
+- Compensation fails → `CompensationFailed`, retried next cycle
+- After `maxAttempts` failures → `HumanIntervention`, saga marked `Failed`
+- No handler registered for ref → `HumanIntervention` immediately
+
+When a step is unblocked, ZombieHunter continues the LIFO compensation
+with all remaining `Done` steps — resuming exactly where the engine stopped.
 
 ### GoblinZombieDemo
 
@@ -257,6 +263,40 @@ saga execution threads at a glance.
 
 ---
 
+## Pluggable persistence
+
+```scala
+// In-memory — for tests
+val store = InMemoryWalStore()
+
+// SQLite — reference implementation, no server required
+val store = SqliteWalStore("./saga.db")
+
+// Your own — implement WalStore
+class MyStore extends WalStore:
+  // Steps
+  def append(sagaId, entry)                          = ...
+  def markRunning(sagaId, stepName)                  = ...
+  def markDone(sagaId, stepName)                     = ...
+  def markFailed(sagaId, stepName)                   = ...
+  def markCompensated(sagaId, stepName)              = ...
+  def markCompensationFailed(sagaId, stepName)       = ...
+  def markHumanIntervention(sagaId, stepName)        = ...
+  def getStatus(sagaId, stepName)                    = ...
+  def incrementCompensationAttempts(sagaId, stepName)= ...
+  def loadCompensationFailed(sagaId)                 = ...
+  def loadDoneInLifoOrder(sagaId)                    = ...
+  // Sagas
+  def registerSaga(sagaId)                           = ...
+  def markSagaCompleted(sagaId)                      = ...
+  def markSagaCompensating(sagaId)                   = ...
+  def markSagaCompensated(sagaId)                    = ...
+  def markSagaFailed(sagaId, cause)                  = ...
+  def findZombies(olderThanMs)                       = ...
+```
+
+---
+
 ## Run the example
 
 ### Local services (in-memory)
@@ -266,15 +306,18 @@ cd saga-graph
 sbt "examples/runMain sagagraph.examples.goblin.GoblinArmyDemo"
 ```
 
+### Volume test with induced compensation failures
+```bash
+sbt "examples/runMain sagagraph.examples.goblin.GoblinArmyDemo 200 0.1"
+```
+
+Args: `goblinCount failureRate` — `failureRate` is the fraction of compensations
+that fail deterministically (based on resource ID hash, reproducible). Use this
+to observe ZombieHunter recovery and `HumanIntervention` escalation under load.
+
 ### HTTP services (Jetty embedded)
 ```bash
 sbt "examples/runMain sagagraph.examples.goblin.http.GoblinArmyHttpDemo"
-```
-Services start automatically on ports 8080-8084. While running:
-```bash
-curl -X POST http://localhost:8081/weapon/acquire \
-     -H "Content-Type: application/json" \
-     -d '{"name":"Grishnakh","weightKg":67}'
 ```
 
 ### Zombie recovery demo
@@ -321,6 +364,7 @@ saga-graph/
 - store modularity — `store-sqlite` and future stores as proper
   installable plugins
 - stress demo — correctness under load with ZombieHunter running concurrently
+- ZombieHunter graceful stop — final recovery cycle before shutdown
 
 ### Uncharted territory
 
@@ -357,6 +401,13 @@ compensated.
 Actions with no possible inverse (send email, burn log, publish event) should
 be modeled as BestEffort steps. saga-graph cannot compensate what cannot be
 undone — and neither can anything else.
+
+### Compensation idempotency is the caller's responsibility
+
+The ZombieHunter may call a compensation more than once for the same step —
+once when the engine first failed, and again on each retry cycle. Services
+must handle duplicate compensation requests safely. This is a standard
+at-least-once delivery constraint and must be designed for explicitly.
 
 ## License
 

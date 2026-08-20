@@ -21,6 +21,11 @@ case class GoblinEquipment(
 // Receives pre-resolved resource IDs — compensation parameters are known
 // before any action executes. This is the deterministic model.
 //
+// failureRate — fraction of compensations that fail deliberately [0.0..1.0]
+//   0.0 = no induced failures (default, production behavior)
+//   0.1 = ~10% of compensations fail (deterministic, based on weaponId hash)
+//   Used only for volume/correctness testing — does not affect the engine.
+//
 // Steps:
 //   1. Mandatory  — measure the goblin (Weights & Measures)
 //   2. Parallel   — acquire weapon + acquire uniform (all-or-nothing)
@@ -29,11 +34,22 @@ case class GoblinEquipment(
 // ---------------------------------------------------------------------------
 object ArmGoblinSaga:
 
-  def apply(goblinName: String, equipment: GoblinEquipment, store: WalStore): SagaResult =
+  def apply(
+      goblinName:  String,
+      equipment:   GoblinEquipment,
+      store:       WalStore,
+      failureRate: Double = 0.0
+  ): SagaResult =
 
     val log    = Slf4jLogger("sagagraph.examples.goblin.ArmGoblinSaga")
     val sagaId = SagaId.generate()
     var goblin = Goblin(goblinName, 0, 0)
+
+    // Deterministic induced failure — based on weaponId hash, not random
+    // Same dataset always produces the same failures — reproducible test results
+    def inducedFailure(id: String): Boolean =
+      failureRate > 0.0 &&
+      (math.abs(id.hashCode) % math.round(1.0 / failureRate).toInt == 0)
 
     SagaContext.run(sagaId):
 
@@ -71,8 +87,12 @@ object ArmGoblinSaga:
                   log.info(s"Weapon ${equipment.weaponId} unavailable — $goblinName")
                   Left(err),
             compensate = () =>
-              log.info(s"Compensating — returning weapon ${equipment.weaponId} — $goblinName")
-              SmithyService.return_(equipment.weaponId),
+              if inducedFailure(equipment.weaponId) then
+                log.warn(s"Compensation induced failure — weapon ${equipment.weaponId} unrecoverable")
+                Left(Exception(s"Smithy unreachable — ${equipment.weaponId} lost"))
+              else
+                log.info(s"Compensating — returning weapon ${equipment.weaponId} — $goblinName")
+                SmithyService.return_(equipment.weaponId),
             ref  = Some("returnWeapon"),
             args = CompArgs("weaponId" -> equipment.weaponId)
           ),
@@ -88,8 +108,12 @@ object ArmGoblinSaga:
                   log.info(s"Uniform ${equipment.uniformId} unavailable — $goblinName")
                   Left(err),
             compensate = () =>
-              log.info(s"Compensating — returning uniform ${equipment.uniformId} — $goblinName")
-              RagsAndStyleService.return_(equipment.uniformId),
+              if inducedFailure(equipment.uniformId) then
+                log.warn(s"Compensation induced failure — uniform ${equipment.uniformId} unrecoverable")
+                Left(Exception(s"Rags & Style unreachable — ${equipment.uniformId} lost"))
+              else
+                log.info(s"Compensating — returning uniform ${equipment.uniformId} — $goblinName")
+                RagsAndStyleService.return_(equipment.uniformId),
             ref  = Some("returnUniform"),
             args = CompArgs("uniformId" -> equipment.uniformId)
           )

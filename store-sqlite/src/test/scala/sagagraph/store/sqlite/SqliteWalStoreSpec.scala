@@ -35,26 +35,29 @@ class SqliteWalStoreSpec
   // -------------------------------------------------------------------------
   "SqliteWalStore" should "create saga and Registered entry on append" in:
     val sagaId = SagaId.generate()
+    store.registerSaga(sagaId)
     store.append(sagaId, dummyEntry).isRight shouldBe true
-    val actionable = store.loadActionable(sagaId)
-    actionable.isRight shouldBe true
-    actionable.toOption.get.map(_.stepName) shouldBe List("LogicalReservation")
+    store.getStatus(sagaId, "LogicalReservation").toOption.get shouldBe WalEntry.Status.Registered
 
   // -------------------------------------------------------------------------
-  // TEST 2: markCompensated removes entry from actionable
+  // TEST 2: markCompensated removes entry from CompensationFailed
   // -------------------------------------------------------------------------
-  it should "remove entry from actionable after markCompensated" in:
+  it should "remove entry from CompensationFailed after markCompensated" in:
     val sagaId = SagaId.generate()
+    store.registerSaga(sagaId)
     store.append(sagaId, dummyEntry)
+    store.markSagaCompensating(sagaId)
+    store.markCompensationFailed(sagaId, "LogicalReservation")
     store.markCompensated(sagaId, "LogicalReservation").isRight shouldBe true
-    store.loadActionable(sagaId).toOption.get shouldBe List.empty
+    store.loadCompensationFailed(sagaId).toOption.get shouldBe List.empty
 
   // -------------------------------------------------------------------------
-  // TEST 3: markSagaCompleted marks saga as finished
+  // TEST 3: markSagaCompleted marks saga as Completed
   // -------------------------------------------------------------------------
   it should "mark saga as completed" in:
     val sagaId = SagaId.generate()
     store.registerSaga(sagaId)
+    store.append(sagaId, dummyEntry)
     store.markSagaCompleted(sagaId).isRight shouldBe true
 
   // -------------------------------------------------------------------------
@@ -81,12 +84,16 @@ class SqliteWalStoreSpec
     store.findZombies(50).toOption.get shouldBe List.empty
 
   // -------------------------------------------------------------------------
-  // TEST 6: loadActionable returns all Registered entries
+  // TEST 6: loadCompensationFailed returns only CompensationFailed entries
   // -------------------------------------------------------------------------
-  it should "return all actionable entries regardless of order" in:
+  it should "return only CompensationFailed entries in loadCompensationFailed" in:
     val sagaId = SagaId.generate()
     val entry2 = dummyEntry.copy(stepName = "PhysicalReservation")
+    store.registerSaga(sagaId)
     store.append(sagaId, dummyEntry)
     store.append(sagaId, entry2)
-    val actionable = store.loadActionable(sagaId).toOption.get
-    actionable.map(_.stepName) should contain allOf ("LogicalReservation", "PhysicalReservation")
+    store.markSagaCompensating(sagaId)
+    // Only mark one as CompensationFailed
+    store.markCompensationFailed(sagaId, "LogicalReservation")
+    val failed = store.loadCompensationFailed(sagaId).toOption.get
+    failed.map(_.stepName) shouldBe List("LogicalReservation")

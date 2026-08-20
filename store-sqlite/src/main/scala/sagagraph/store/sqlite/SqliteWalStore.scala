@@ -98,31 +98,19 @@ class SqliteWalStore(dbPath: String) extends WalStore:
         Right(())
       catch case e: Throwable => Left(e)
 
-  def markCompensated(
-      sagaId: SagaId,
-      stepName: String
-  ): Either[Throwable, Unit] =
+  def markCompensated(sagaId: SagaId, stepName: String): Either[Throwable, Unit] =
     synchronized:
       updateEntryStatus(sagaId, stepName, "Compensated")
 
-  def markCompensationFailed(
-      sagaId: SagaId,
-      stepName: String
-  ): Either[Throwable, Unit] =
+  def markCompensationFailed(sagaId: SagaId, stepName: String): Either[Throwable, Unit] =
     synchronized:
       updateEntryStatus(sagaId, stepName, "CompensationFailed")
 
-  def markHumanIntervention(
-      sagaId: SagaId,
-      stepName: String
-  ): Either[Throwable, Unit] =
+  def markHumanIntervention(sagaId: SagaId, stepName: String): Either[Throwable, Unit] =
     synchronized:
       updateEntryStatus(sagaId, stepName, "HumanIntervention")
 
-  def getStatus(
-      sagaId: SagaId,
-      stepName: String
-  ): Either[Throwable, WalEntry.Status] =
+  def getStatus(sagaId: SagaId, stepName: String): Either[Throwable, WalEntry.Status] =
     synchronized:
       try
         val sql = """
@@ -136,30 +124,28 @@ class SqliteWalStore(dbPath: String) extends WalStore:
         val result =
           if rs.next() then
             rs.getString("status") match
-              case "Registered"  => Right(WalEntry.Status.Registered)
-              case "Running"     => Right(WalEntry.Status.Running)
-              case "Done"        => Right(WalEntry.Status.Done)
-              case "Failed"      => Right(WalEntry.Status.Failed)
-              case "Compensated" => Right(WalEntry.Status.Compensated)
-              case "CompensationFailed" =>
-                Right(WalEntry.Status.CompensationFailed)
-              case "HumanIntervention" =>
-                Right(WalEntry.Status.HumanIntervention)
-              case unknown => Left(Exception(s"Unknown status: $unknown"))
+              case "Registered"         => Right(WalEntry.Status.Registered)
+              case "Running"            => Right(WalEntry.Status.Running)
+              case "Done"               => Right(WalEntry.Status.Done)
+              case "Failed"             => Right(WalEntry.Status.Failed)
+              case "Compensated"        => Right(WalEntry.Status.Compensated)
+              case "CompensationFailed" => Right(WalEntry.Status.CompensationFailed)
+              case "HumanIntervention"  => Right(WalEntry.Status.HumanIntervention)
+              case unknown              => Left(Exception(s"Unknown status: $unknown"))
           else Left(Exception(s"Step '$stepName' not found for saga $sagaId"))
         rs.close()
         ps.close()
         result
       catch case e: Throwable => Left(e)
 
-  // Returns Registered and CompensationFailed entries — actionable by ZombieHunter
-  def loadActionable(sagaId: SagaId): Either[Throwable, List[WalEntry]] =
+  // Returns only CompensationFailed entries — ZombieHunter must never touch Registered steps
+  def loadCompensationFailed(sagaId: SagaId): Either[Throwable, List[WalEntry]] =
     synchronized:
       try
         val sql = """
           SELECT step_name, compensation_ref, compensation_args
           FROM   wal_entries
-          WHERE  saga_id = ? AND status IN ('Registered', 'CompensationFailed')
+          WHERE  saga_id = ? AND status = 'CompensationFailed'
           ORDER  BY created_at DESC
         """
         val ps = conn.prepareStatement(sql)
@@ -168,14 +154,69 @@ class SqliteWalStore(dbPath: String) extends WalStore:
         val buffer = scala.collection.mutable.ListBuffer.empty[WalEntry]
         while rs.next() do
           buffer += WalEntry(
-            stepName = rs.getString("step_name"),
-            compensate = () => Right(()),
-            compensationRef = Option(rs.getString("compensation_ref")),
+            stepName         = rs.getString("step_name"),
+            compensate       = () => Right(()),
+            compensationRef  = Option(rs.getString("compensation_ref")),
             compensationArgs = Option(rs.getString("compensation_args"))
           )
         rs.close()
         ps.close()
         Right(buffer.toList)
+      catch case e: Throwable => Left(e)
+
+  // Returns Done entries in LIFO order — ZombieHunter uses this to continue
+  // compensation after unblocking a CompensationFailed step
+  def loadDoneInLifoOrder(sagaId: SagaId): Either[Throwable, List[WalEntry]] =
+    synchronized:
+      try
+        val sql = """
+          SELECT step_name, compensation_ref, compensation_args
+          FROM   wal_entries
+          WHERE  saga_id = ? AND status = 'Done'
+          ORDER  BY created_at DESC
+        """
+        val ps = conn.prepareStatement(sql)
+        ps.setString(1, sagaId.value)
+        val rs = ps.executeQuery()
+        val buffer = scala.collection.mutable.ListBuffer.empty[WalEntry]
+        while rs.next() do
+          buffer += WalEntry(
+            stepName         = rs.getString("step_name"),
+            compensate       = () => Right(()),
+            compensationRef  = Option(rs.getString("compensation_ref")),
+            compensationArgs = Option(rs.getString("compensation_args"))
+          )
+        rs.close()
+        ps.close()
+        Right(buffer.toList)
+      catch case e: Throwable => Left(e)
+
+  // Increments compensation_attempts and returns the new count
+  def incrementCompensationAttempts(sagaId: SagaId, stepName: String): Either[Throwable, Int] =
+    synchronized:
+      try
+        val updateSql = """
+          UPDATE wal_entries
+          SET    compensation_attempts = compensation_attempts + 1
+          WHERE  saga_id = ? AND step_name = ?
+        """
+        val ps = conn.prepareStatement(updateSql)
+        ps.setString(1, sagaId.value)
+        ps.setString(2, stepName)
+        ps.executeUpdate()
+        ps.close()
+        val selectSql = """
+          SELECT compensation_attempts FROM wal_entries
+          WHERE  saga_id = ? AND step_name = ?
+        """
+        val ps2 = conn.prepareStatement(selectSql)
+        ps2.setString(1, sagaId.value)
+        ps2.setString(2, stepName)
+        val rs = ps2.executeQuery()
+        val attempts = if rs.next() then rs.getInt("compensation_attempts") else 0
+        rs.close()
+        ps2.close()
+        Right(attempts)
       catch case e: Throwable => Left(e)
 
   // -------------------------------------------------------------------------
@@ -209,10 +250,7 @@ class SqliteWalStore(dbPath: String) extends WalStore:
     synchronized:
       updateSagaStatus(sagaId, "Compensated")
 
-  def markSagaFailed(
-      sagaId: SagaId,
-      cause: Throwable
-  ): Either[Throwable, Unit] =
+  def markSagaFailed(sagaId: SagaId, cause: Throwable): Either[Throwable, Unit] =
     synchronized:
       updateSagaStatus(sagaId, "Failed")
 
@@ -270,23 +308,62 @@ class SqliteWalStore(dbPath: String) extends WalStore:
       val rs = st.executeQuery(sql)
       var lastSaga = ""
       while rs.next() do
-        val sagaId = rs.getString("saga_id")
+        val sagaId   = rs.getString("saga_id")
         val stepName = rs.getString("step_name")
-        val started = rs.getLong("started_ms").toString.padTo(10, ' ')
+        val started  = rs.getLong("started_ms").toString.padTo(10, ' ')
         val finished = rs.getLong("finished_ms").toString.padTo(10, ' ')
         val duration = rs.getLong("duration_ms").toString.padTo(8, ' ')
         val parallel = rs.getString("parallel")
         if sagaId != lastSaga then
           println(s"\n  saga: $sagaId")
-          println(
-            s"  ${"step".padTo(25, ' ')} ${"start(ms)".padTo(10, ' ')} ${"end(ms)"
-                .padTo(10, ' ')} ${"dur(ms)".padTo(8, ' ')} parallel"
-          )
+          println(s"  ${"step".padTo(25, ' ')} ${"start(ms)".padTo(10, ' ')} ${"end(ms)".padTo(10, ' ')} ${"dur(ms)".padTo(8, ' ')} parallel")
           println(s"  ${"-" * 65}")
           lastSaga = sagaId
-        println(
-          s"  ${stepName.padTo(25, ' ')} $started $finished $duration $parallel"
-        )
+        println(s"  ${stepName.padTo(25, ' ')} $started $finished $duration $parallel")
+      rs.close()
+      st.close()
+
+  // ---------------------------------------------------------------------------
+  // Diagnostics — convenience methods for demo and debugging
+  // Equivalent SQL:
+  //   SELECT status, COUNT(*) FROM sagas GROUP BY status;
+  //   SELECT status, COUNT(*) FROM wal_entries GROUP BY status;
+  // ---------------------------------------------------------------------------
+
+  def printSagaStats(): Unit =
+    synchronized:
+      val st = conn.createStatement()
+      val rs = st.executeQuery(
+        "SELECT status, COUNT(*) as total FROM sagas GROUP BY status ORDER BY status"
+      )
+      println("  Sagas by status:")
+      var clean = true
+      while rs.next() do
+        val status = rs.getString("status")
+        val total  = rs.getInt("total")
+        val warn   = if status == "Failed" || status == "Running" then " ⚠" else ""
+        if warn.nonEmpty then clean = false
+        println(f"    $status%-22s $total%5d$warn")
+      if clean then println("  ✓ No saga inconsistencies detected")
+      rs.close()
+      st.close()
+
+  def printEntryStats(): Unit =
+    synchronized:
+      val st = conn.createStatement()
+      val rs = st.executeQuery(
+        "SELECT status, COUNT(*) as total FROM wal_entries GROUP BY status ORDER BY status"
+      )
+      val dangerStates = Set("Registered", "Running", "CompensationFailed", "HumanIntervention")
+      println("  WAL entries by status:")
+      var clean = true
+      while rs.next() do
+        val status = rs.getString("status")
+        val total  = rs.getInt("total")
+        val warn   = if dangerStates.contains(status) then " ⚠" else ""
+        if warn.nonEmpty then clean = false
+        println(f"    $status%-22s $total%5d$warn")
+      if clean then println("  ✓ No WAL inconsistencies detected")
       rs.close()
       st.close()
 
@@ -297,9 +374,9 @@ class SqliteWalStore(dbPath: String) extends WalStore:
   // -------------------------------------------------------------------------
 
   private def updateEntryStatus(
-      sagaId: SagaId,
+      sagaId:   SagaId,
       stepName: String,
-      status: String
+      status:   String
   ): Either[Throwable, Unit] =
     try
       val sql = """
@@ -321,7 +398,7 @@ class SqliteWalStore(dbPath: String) extends WalStore:
   ): Either[Throwable, Unit] =
     try
       val sql = "UPDATE sagas SET status = ? WHERE saga_id = ?"
-      val ps = conn.prepareStatement(sql)
+      val ps  = conn.prepareStatement(sql)
       ps.setString(1, status)
       ps.setString(2, sagaId.value)
       ps.executeUpdate()
@@ -342,12 +419,13 @@ class SqliteWalStore(dbPath: String) extends WalStore:
       CREATE TABLE IF NOT EXISTS wal_entries (
         saga_id           TEXT    NOT NULL,
         step_name         TEXT    NOT NULL,
-        status            TEXT    NOT NULL DEFAULT 'Registered',
-        compensation_ref  TEXT,
-        compensation_args TEXT,
-        created_at        INTEGER NOT NULL,
-        started_at        INTEGER,
-        finished_at       INTEGER,
+        status                TEXT    NOT NULL DEFAULT 'Registered',
+        compensation_ref      TEXT,
+        compensation_args     TEXT,
+        compensation_attempts INTEGER NOT NULL DEFAULT 0,
+        created_at            INTEGER NOT NULL,
+        started_at            INTEGER,
+        finished_at           INTEGER,
         PRIMARY KEY (saga_id, step_name),
         FOREIGN KEY (saga_id) REFERENCES sagas(saga_id)
       )

@@ -111,7 +111,7 @@ object GoblinZombieDemo:
     // -------------------------------------------------------------------------
     println("\n" + "=" * 60)
     println("=== ZOMBIE RECOVERY REPORT ===")
-    store.loadActionable(sagaId) match
+    store.loadCompensationFailed(sagaId) match
       case Left(err) =>
         println(s"  ERROR reading WAL: ${err.getMessage}")
       case Right(pending) if pending.isEmpty =>

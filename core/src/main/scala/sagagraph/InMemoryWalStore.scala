@@ -5,14 +5,15 @@ import scala.collection.mutable
 class InMemoryWalStore extends WalStore:
 
   private case class StoredEntry(
-      entry: WalEntry,
-      @volatile var status: WalEntry.Status = WalEntry.Status.Registered,
-      @volatile var startedAt: Option[Long] = None,
-      @volatile var finishedAt: Option[Long] = None
+      entry:     WalEntry,
+      @volatile var status:               WalEntry.Status = WalEntry.Status.Registered,
+      @volatile var startedAt:            Option[Long]    = None,
+      @volatile var finishedAt:           Option[Long]    = None,
+      @volatile var compensationAttempts: Int             = 0
   )
 
-  private val store = mutable.Map.empty[SagaId, mutable.ListBuffer[StoredEntry]]
-  private val sagas = mutable.Map.empty[SagaId, SagaStatus]
+  private val store      = mutable.Map.empty[SagaId, mutable.ListBuffer[StoredEntry]]
+  private val sagas      = mutable.Map.empty[SagaId, SagaStatus]
   private val timestamps = mutable.Map.empty[SagaId, Long]
 
   // -------------------------------------------------------------------------
@@ -22,9 +23,7 @@ class InMemoryWalStore extends WalStore:
   def append(sagaId: SagaId, entry: WalEntry): Either[Throwable, Unit] =
     synchronized:
       try
-        store.getOrElseUpdate(sagaId, mutable.ListBuffer.empty) += StoredEntry(
-          entry
-        )
+        store.getOrElseUpdate(sagaId, mutable.ListBuffer.empty) += StoredEntry(entry)
         timestamps.getOrElseUpdate(sagaId, System.currentTimeMillis())
         Right(())
       catch case e: Throwable => Left(e)
@@ -34,7 +33,7 @@ class InMemoryWalStore extends WalStore:
       findEntry(sagaId, stepName) match
         case None => Left(Exception(s"[$sagaId] step '$stepName' not found"))
         case Some(e) =>
-          e.status = WalEntry.Status.Running
+          e.status    = WalEntry.Status.Running
           e.startedAt = Some(System.currentTimeMillis())
           Right(())
 
@@ -43,7 +42,7 @@ class InMemoryWalStore extends WalStore:
       findEntry(sagaId, stepName) match
         case None => Left(Exception(s"[$sagaId] step '$stepName' not found"))
         case Some(e) =>
-          e.status = WalEntry.Status.Done
+          e.status     = WalEntry.Status.Done
           e.finishedAt = Some(System.currentTimeMillis())
           Right(())
 
@@ -52,58 +51,63 @@ class InMemoryWalStore extends WalStore:
       findEntry(sagaId, stepName) match
         case None => Left(Exception(s"[$sagaId] step '$stepName' not found"))
         case Some(e) =>
-          e.status = WalEntry.Status.Failed
+          e.status     = WalEntry.Status.Failed
           e.finishedAt = Some(System.currentTimeMillis())
           Right(())
 
-  def markCompensated(
-      sagaId: SagaId,
-      stepName: String
-  ): Either[Throwable, Unit] =
+  def markCompensated(sagaId: SagaId, stepName: String): Either[Throwable, Unit] =
     synchronized:
       findEntry(sagaId, stepName) match
         case None    => Left(Exception(s"[$sagaId] step '$stepName' not found"))
         case Some(e) => e.status = WalEntry.Status.Compensated; Right(())
 
-  def markCompensationFailed(
-      sagaId: SagaId,
-      stepName: String
-  ): Either[Throwable, Unit] =
+  def markCompensationFailed(sagaId: SagaId, stepName: String): Either[Throwable, Unit] =
     synchronized:
       findEntry(sagaId, stepName) match
         case None    => Left(Exception(s"[$sagaId] step '$stepName' not found"))
         case Some(e) => e.status = WalEntry.Status.CompensationFailed; Right(())
 
-  def markHumanIntervention(
-      sagaId: SagaId,
-      stepName: String
-  ): Either[Throwable, Unit] =
+  def markHumanIntervention(sagaId: SagaId, stepName: String): Either[Throwable, Unit] =
     synchronized:
       findEntry(sagaId, stepName) match
         case None    => Left(Exception(s"[$sagaId] step '$stepName' not found"))
         case Some(e) => e.status = WalEntry.Status.HumanIntervention; Right(())
 
-  def getStatus(
-      sagaId: SagaId,
-      stepName: String
-  ): Either[Throwable, WalEntry.Status] =
+  def getStatus(sagaId: SagaId, stepName: String): Either[Throwable, WalEntry.Status] =
     synchronized:
       findEntry(sagaId, stepName) match
         case None    => Left(Exception(s"[$sagaId] step '$stepName' not found"))
         case Some(e) => Right(e.status)
 
-  // Returns Registered and CompensationFailed entries — actionable by ZombieHunter
-  def loadActionable(sagaId: SagaId): Either[Throwable, List[WalEntry]] =
+  def incrementCompensationAttempts(sagaId: SagaId, stepName: String): Either[Throwable, Int] =
+    synchronized:
+      findEntry(sagaId, stepName) match
+        case None => Left(Exception(s"[$sagaId] step '$stepName' not found"))
+        case Some(e) =>
+          e.compensationAttempts += 1
+          Right(e.compensationAttempts)
+
+  // Returns only CompensationFailed entries — ZombieHunter must never touch Registered steps
+  def loadCompensationFailed(sagaId: SagaId): Either[Throwable, List[WalEntry]] =
     synchronized:
       Right(
         store
           .getOrElse(sagaId, mutable.ListBuffer.empty)
-          .filter(e =>
-            e.status == WalEntry.Status.Registered ||
-              e.status == WalEntry.Status.CompensationFailed
-          )
+          .filter(_.status == WalEntry.Status.CompensationFailed)
           .map(_.entry)
           .toList
+      )
+
+  // Returns Done entries in LIFO order (reverse insertion order)
+  def loadDoneInLifoOrder(sagaId: SagaId): Either[Throwable, List[WalEntry]] =
+    synchronized:
+      Right(
+        store
+          .getOrElse(sagaId, mutable.ListBuffer.empty)
+          .filter(_.status == WalEntry.Status.Done)
+          .map(_.entry)
+          .toList
+          .reverse  // LIFO — last inserted first
       )
 
   // -------------------------------------------------------------------------
@@ -131,10 +135,7 @@ class InMemoryWalStore extends WalStore:
       sagas(sagaId) = SagaStatus.Compensated
       Right(())
 
-  def markSagaFailed(
-      sagaId: SagaId,
-      cause: Throwable
-  ): Either[Throwable, Unit] =
+  def markSagaFailed(sagaId: SagaId, cause: Throwable): Either[Throwable, Unit] =
     synchronized:
       sagas(sagaId) = SagaStatus.Failed(cause)
       Right(())
@@ -142,7 +143,6 @@ class InMemoryWalStore extends WalStore:
   def findZombies(olderThanMs: Long): Either[Throwable, List[SagaId]] =
     synchronized:
       val threshold = System.currentTimeMillis() - olderThanMs
-      val terminalStates = Set(SagaStatus.Completed, SagaStatus.Compensated)
       Right(
         timestamps
           .filter { case (id, ts) =>
