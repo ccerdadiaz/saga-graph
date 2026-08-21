@@ -325,6 +325,18 @@ sbt "examples/runMain sagagraph.examples.goblin.http.GoblinArmyHttpDemo"
 sbt "examples/runMain sagagraph.examples.goblin.GoblinZombieDemo"
 ```
 
+### The happy-happy path
+```bash
+sbt "examples/runMain sagagraph.examples.goblin.GoblinHappyHappyDemo"
+```
+
+Grishnakh (bigfoot, size 15) reserves a sword and a uniform, then fails
+on boots — no size 15 available. His compensation returns both resources
+to the pool. Ugluk (standard size 7) arrives next, picks up exactly those
+resources, and completes successfully.
+
+Compensation is not loss — it is reaprovisionamiento.
+
 ## Transport agnostic
 
 The saga engine sees only `() => Either[Throwable, Unit]` — it knows nothing
@@ -373,8 +385,7 @@ interesting parts of the project.
 
 - **saga-viz** — real Gantt diagram from the WAL: parallel branches, timings,
   and compensation flows drawn from what actually happened, not what was planned
-- **happy-happy path** — demonstrate a resource returned by saga A being
-  consumed by saga B with precise timing, proving compensation is not loss
+
 
 ---
 
