@@ -25,8 +25,12 @@ trait WalStore:
   // Step Done (successfully completed)
   def markDone(sagaId: SagaId, stepName: String): Either[Throwable, Unit]
 
-  // Step Failed
+  // Step Failed — service guarantees clean state, no compensation needed
   def markFailed(sagaId: SagaId, stepName: String): Either[Throwable, Unit]
+
+  // Step Unknown — no response within TTL, service may or may not have acted
+  // ZombieHunter will compensate idempotently
+  def markUnknown(sagaId: SagaId, stepName: String): Either[Throwable, Unit]
 
   // Step Compensated (successfully)
   def markCompensated(sagaId: SagaId, stepName: String): Either[Throwable, Unit]
@@ -57,7 +61,7 @@ trait WalStore:
       stepName: String
   ): Either[Throwable, Int]
 
-  // Returns only CompensationFailed entries — actionable by ZombieHunter
+  // Returns CompensationFailed and Unknown entries — actionable by ZombieHunter
   // NOTE: Registered entries are NOT included — they belong to live or
   // not-yet-started sagas. ZombieHunter must never touch Registered steps.
   def loadCompensationFailed(sagaId: SagaId): Either[Throwable, List[WalEntry]]

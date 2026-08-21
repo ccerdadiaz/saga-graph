@@ -1,5 +1,7 @@
 package sagagraph
 
+import scala.concurrent.duration.*
+
 // ---------------------------------------------------------------------------
 // Unique identifier for a saga execution
 // ---------------------------------------------------------------------------
@@ -12,33 +14,46 @@ object SagaId:
 // ---------------------------------------------------------------------------
 // SagaStep hierarchy — each type enforces its own contract at compile time
 //
-// MandatoryStep — failure compensates the entire graph
-// OptionalStep  — failure recorded, saga continues
+// MandatoryStep  — failure compensates the entire graph
+// OptionalStep   — failure recorded, saga continues
 // BestEffortStep — failure silently ignored, no compensation
+//
+// All steps have a TTL — no infinite waits. If a step does not respond
+// within its TTL, it is marked Unknown and treated as a compensation
+// candidate by the ZombieHunter.
+//
+// BestEffort steps should be fire-and-forget services that never block.
+// If a BestEffort step requires a meaningful TTL, consider OptionalStep.
 // ---------------------------------------------------------------------------
 sealed trait SagaStep:
   def name: String
-  def run: () => Either[Throwable, Unit]
+  def run:  () => Either[Throwable, Unit]
+  def ttl:  Duration
 
 case class MandatoryStep(
-    name: String,
-    run: () => Either[Throwable, Unit],
-    compensate: () => Either[Throwable, Unit],
-    compensationRef: Option[String] = None,
-    compensationArgs: Option[String] = None
+    name:             String,
+    run:              () => Either[Throwable, Unit],
+    compensate:       () => Either[Throwable, Unit],
+    compensationRef:  Option[String]  = None,
+    compensationArgs: Option[String]  = None,
+    ttl:              Duration        = 30.seconds
 ) extends SagaStep
 
 case class OptionalStep(
-    name: String,
-    run: () => Either[Throwable, Unit],
-    compensate: () => Either[Throwable, Unit],
-    compensationRef: Option[String] = None,
-    compensationArgs: Option[String] = None
+    name:             String,
+    run:              () => Either[Throwable, Unit],
+    compensate:       () => Either[Throwable, Unit],
+    compensationRef:  Option[String]  = None,
+    compensationArgs: Option[String]  = None,
+    ttl:              Duration        = 30.seconds
 ) extends SagaStep
 
 case class BestEffortStep(
     name: String,
-    run: () => Either[Throwable, Unit]
+    run:  () => Either[Throwable, Unit],
+    // BestEffort steps should be fire-and-forget — TTL here is a safety net.
+    // If this step regularly needs more than a few seconds, use OptionalStep.
+    ttl:  Duration = 5.seconds
 ) extends SagaStep
 
 // ---------------------------------------------------------------------------
@@ -64,22 +79,23 @@ enum SagaStatus:
 // WAL entry — compensation captured in closure + serializable reference
 // ---------------------------------------------------------------------------
 case class WalEntry(
-    stepName: String,
-    compensate: () => Either[Throwable, Unit],
-    compensationRef: Option[String],
+    stepName:         String,
+    compensate:       () => Either[Throwable, Unit],
+    compensationRef:  Option[String],
     compensationArgs: Option[String],
-    status: WalEntry.Status = WalEntry.Status.Registered
+    status:           WalEntry.Status = WalEntry.Status.Registered
 )
 
 object WalEntry:
   enum Status:
-    case Registered // Action recorded, still not started
-    case Running // Action started
-    case Done // Action finished Ok
-    case Failed // Action failed
-    case Compensated // Compensation Ok
+    case Registered         // Step recorded, still not started
+    case Running            // Step started
+    case Done               // Step finished Ok
+    case Failed             // Step failed — service guarantees clean state
+    case Unknown            // No response within TTL — service may or may not have acted
+    case Compensated        // Compensation Ok
     case CompensationFailed // Compensation failed, ZH will retry
-    case HumanIntervention // Not able to compensate.
+    case HumanIntervention  // Compensation policy exhausted — requires human action
 
 case class ParallelForkException(failures: List[(String, Throwable)])
     extends Exception(

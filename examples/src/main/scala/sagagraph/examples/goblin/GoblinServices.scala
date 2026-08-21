@@ -35,9 +35,7 @@ object WeightsAndMeasuresService:
     latency()
     val weight = 40 + (goblinName.length * 3) % 30
     val height = 120 + (goblinName.length * 7) % 40
-    log.info(
-      s"[Weights & Measures] $goblinName: ${weight}kg, ${height}cm. Adequate."
-    )
+    log.info(s"[Weights & Measures] $goblinName: ${weight}kg, ${height}cm. Adequate.")
     Right(Goblin(goblinName, weight, height))
 
 // ---------------------------------------------------------------------------
@@ -45,11 +43,7 @@ object WeightsAndMeasuresService:
 // ---------------------------------------------------------------------------
 object SmithyService:
 
-  private case class WeaponEntry(
-      id: String,
-      label: String,
-      var available: Boolean = true
-  )
+  private case class WeaponEntry(id: String, label: String, var available: Boolean = true)
 
   private val catalog = scala.collection.mutable.ListBuffer(
     WeaponEntry("sword-1", "heavy short sword"),
@@ -59,9 +53,7 @@ object SmithyService:
 
   // Returns available IDs in random order — simulates service-side selection policy
   def getAvailable(): List[String] =
-    synchronized {
-      scala.util.Random.shuffle(catalog.filter(_.available).map(_.id)).toList
-    }
+    synchronized { scala.util.Random.shuffle(catalog.filter(_.available).map(_.id).toList) }
 
   def acquire(weaponId: String): Either[Throwable, Weapon] =
     latency()
@@ -69,9 +61,7 @@ object SmithyService:
       catalog.find(w => w.id == weaponId && w.available) match
         case Some(w) =>
           w.available = false
-          log.info(
-            s"[Smithy] $weaponId acquired. Available: ${getAvailable().mkString(", ")}."
-          )
+          log.info(s"[Smithy] $weaponId acquired. Available: ${getAvailable().mkString(", ")}.")
           Right(Weapon(w.id, w.label))
         case None =>
           log.info(s"[Smithy] $weaponId — not available. The forge is cold.")
@@ -81,38 +71,35 @@ object SmithyService:
     latency()
     synchronized:
       catalog.find(_.id == weaponId).foreach(_.available = true)
-      log.info(
-        s"[Smithy] $weaponId returned and available for another request. Available: ${getAvailable()
-            .mkString(", ")}."
-      )
+      log.info(s"[Smithy] $weaponId returned and available for another request. Available: ${getAvailable().mkString(", ")}.")
       Right(())
+
+  // Raw acquire without random latency — for demos that need controlled timing
+  def acquireRaw(weaponId: String): Either[Throwable, Weapon] =
+    synchronized:
+      catalog.find(w => w.id == weaponId && w.available) match
+        case Some(w) =>
+          w.available = false
+          log.info(s"[Smithy] $weaponId acquired (raw). Available: ${getAvailable().mkString(", ")}.")
+          Right(Weapon(w.id, w.label))
+        case None =>
+          Left(OutOfStockException("Smithy"))
 
   // Resets all weapons to available — for demo and testing purposes
   def reset(): Unit = synchronized { catalog.foreach(_.available = true) }
 
   // Resets stock to n weapons — generates additional entries if needed
   def resetWithStock(n: Int): Unit = synchronized:
-    catalog.foreach(_.available = false)
-    val entries = (1 to n).map(i =>
-      WeaponEntry(
-        s"sword-$i",
-        if i % 2 == 0 then "standard short sword" else "heavy short sword",
-        available = true
-      )
-    )
     catalog.clear()
-    catalog.addAll(entries)
+    (1 to n).foreach(i => catalog += WeaponEntry(s"sword-$i",
+      if i % 2 == 0 then "standard short sword" else "heavy short sword", available = true))
 
 // ---------------------------------------------------------------------------
 // Rags & Style — fixed catalog of uniforms
 // ---------------------------------------------------------------------------
 object RagsAndStyleService:
 
-  private case class UniformEntry(
-      id: String,
-      size: String,
-      var available: Boolean = true
-  )
+  private case class UniformEntry(id: String, size: String, var available: Boolean = true)
 
   private val catalog = scala.collection.mutable.ListBuffer(
     UniformEntry("uniform-1", "S"),
@@ -123,13 +110,7 @@ object RagsAndStyleService:
 
   // Returns available IDs in random order — simulates service-side selection policy
   def getAvailable(size: String): List[String] =
-    synchronized {
-      scala.util.Random
-        .shuffle(
-          catalog.filter(u => u.available && u.size == size).map(_.id)
-        )
-        .toList
-    }
+    synchronized { scala.util.Random.shuffle(catalog.filter(u => u.available && u.size == size).map(_.id).toList) }
 
   def acquire(uniformId: String): Either[Throwable, Uniform] =
     latency()
@@ -137,23 +118,17 @@ object RagsAndStyleService:
       catalog.find(u => u.id == uniformId && u.available) match
         case Some(u) =>
           u.available = false
-          log.info(
-            s"[Rags & Style] $uniformId (size ${u.size}) acquired. Available: ${catalog.filter(_.available).map(_.id).mkString(", ")}."
-          )
+          log.info(s"[Rags & Style] $uniformId (size ${u.size}) acquired. Available: ${catalog.filter(_.available).map(_.id).mkString(", ")}.")
           Right(Uniform(u.id, u.size, "Dark Army Green™"))
         case None =>
-          log.info(
-            s"[Rags & Style] $uniformId — not available. Naked goblins are undignified."
-          )
+          log.info(s"[Rags & Style] $uniformId — not available. Naked goblins are undignified.")
           Left(OutOfStockException("Rags & Style"))
 
   def return_(uniformId: String): Either[Throwable, Unit] =
     latency()
     synchronized:
       catalog.find(_.id == uniformId).foreach(_.available = true)
-      log.info(
-        s"[Rags & Style] $uniformId returned and available for another request."
-      )
+      log.info(s"[Rags & Style] $uniformId returned and available for another request.")
       Right(())
 
   // Resets all uniforms to available — for demo and testing purposes
@@ -163,24 +138,14 @@ object RagsAndStyleService:
   def resetWithStock(n: Int): Unit = synchronized:
     catalog.clear()
     val sizes = List("S", "L", "S", "L")
-    (1 to n).foreach(i =>
-      catalog += UniformEntry(
-        s"uniform-$i",
-        sizes((i - 1) % 4),
-        available = true
-      )
-    )
+    (1 to n).foreach(i => catalog += UniformEntry(s"uniform-$i", sizes((i-1) % 4), available = true))
 
 // ---------------------------------------------------------------------------
 // Cobblery — fixed catalog of boots
 // ---------------------------------------------------------------------------
 object CobbleryService:
 
-  private case class BootsEntry(
-      id: String,
-      bootSize: Int,
-      var available: Boolean = true
-  )
+  private case class BootsEntry(id: String, bootSize: Int, var available: Boolean = true)
 
   private val catalog = scala.collection.mutable.ListBuffer(
     BootsEntry("boots-1", 7),
@@ -189,18 +154,10 @@ object CobbleryService:
 
   // Returns available IDs in random order — simulates service-side selection policy
   def getAvailable(size: Int): List[String] =
-    synchronized {
-      scala.util.Random
-        .shuffle(
-          catalog.filter(b => b.available && b.bootSize == size).map(_.id)
-        )
-        .toList
-    }
+    synchronized { scala.util.Random.shuffle(catalog.filter(b => b.available && b.bootSize == size).map(_.id).toList) }
 
   def getAvailableAny(): List[String] =
-    synchronized {
-      scala.util.Random.shuffle(catalog.filter(_.available).map(_.id)).toList
-    }
+    synchronized { scala.util.Random.shuffle(catalog.filter(_.available).map(_.id).toList) }
 
   def acquire(bootsId: String): Either[Throwable, Boot] =
     latency()
@@ -208,9 +165,7 @@ object CobbleryService:
       catalog.find(b => b.id == bootsId && b.available) match
         case Some(b) =>
           b.available = false
-          log.info(
-            s"[Cobblery] $bootsId (size ${b.bootSize}) acquired. Available: ${catalog.filter(_.available).map(_.id).mkString(", ")}."
-          )
+          log.info(s"[Cobblery] $bootsId (size ${b.bootSize}) acquired. Available: ${catalog.filter(_.available).map(_.id).mkString(", ")}.")
           Right(Boot(b.id, b.bootSize))
         case None =>
           log.info(s"[Cobblery] $bootsId — not available. Barefoot it is.")
@@ -220,9 +175,7 @@ object CobbleryService:
     latency()
     synchronized:
       catalog.find(_.id == bootsId).foreach(_.available = true)
-      log.info(
-        s"[Cobblery] $bootsId returned and available for another request."
-      )
+      log.info(s"[Cobblery] $bootsId returned and available for another request.")
       Right(())
 
   // Resets all boots to available — for demo and testing purposes
@@ -232,9 +185,7 @@ object CobbleryService:
   def resetWithStock(n: Int): Unit = synchronized:
     catalog.clear()
     val sizes = List(7, 8, 9, 6)
-    (1 to n).foreach(i =>
-      catalog += BootsEntry(s"boots-$i", sizes((i - 1) % 4), available = true)
-    )
+    (1 to n).foreach(i => catalog += BootsEntry(s"boots-$i", sizes((i-1) % 4), available = true))
 
 // ---------------------------------------------------------------------------
 // Portrait Service — best effort, always unreliable
@@ -242,9 +193,7 @@ object CobbleryService:
 object PortraitService:
   def sendToMother(goblin: Goblin): Either[Throwable, Unit] =
     latency()
-    log.info(
-      s"[Portrait] Attempting to send ${goblin.name}'s portrait to mother..."
-    )
+    log.info(s"[Portrait] Attempting to send ${goblin.name}'s portrait to mother...")
     log.warn(s"[Portrait] Postal raven lost. Mother will never know.")
     Left(Exception("Raven not found"))
 

@@ -55,6 +55,15 @@ class InMemoryWalStore extends WalStore:
           e.finishedAt = Some(System.currentTimeMillis())
           Right(())
 
+  def markUnknown(sagaId: SagaId, stepName: String): Either[Throwable, Unit] =
+    synchronized:
+      findEntry(sagaId, stepName) match
+        case None    => Left(Exception(s"[$sagaId] step '$stepName' not found"))
+        case Some(e) =>
+          e.status     = WalEntry.Status.Unknown
+          e.finishedAt = Some(System.currentTimeMillis())
+          Right(())
+
   def markCompensated(sagaId: SagaId, stepName: String): Either[Throwable, Unit] =
     synchronized:
       findEntry(sagaId, stepName) match
@@ -87,13 +96,18 @@ class InMemoryWalStore extends WalStore:
           e.compensationAttempts += 1
           Right(e.compensationAttempts)
 
-  // Returns only CompensationFailed entries — ZombieHunter must never touch Registered steps
+  // Returns CompensationFailed and Unknown entries — actionable by ZombieHunter
+  // NOTE: Registered entries are NOT included — they belong to live or
+  // not-yet-started sagas. ZombieHunter must never touch Registered steps.
   def loadCompensationFailed(sagaId: SagaId): Either[Throwable, List[WalEntry]] =
     synchronized:
       Right(
         store
           .getOrElse(sagaId, mutable.ListBuffer.empty)
-          .filter(_.status == WalEntry.Status.CompensationFailed)
+          .filter(e =>
+            e.status == WalEntry.Status.CompensationFailed ||
+            e.status == WalEntry.Status.Unknown
+          )
           .map(_.entry)
           .toList
       )

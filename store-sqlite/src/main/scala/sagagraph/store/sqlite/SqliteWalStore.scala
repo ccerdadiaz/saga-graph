@@ -98,6 +98,19 @@ class SqliteWalStore(dbPath: String) extends WalStore:
         Right(())
       catch case e: Throwable => Left(e)
 
+  def markUnknown(sagaId: SagaId, stepName: String): Either[Throwable, Unit] =
+    synchronized:
+      try
+        val sql = "UPDATE wal_entries SET status = 'Unknown', finished_at = ? WHERE saga_id = ? AND step_name = ?"
+        val ps = conn.prepareStatement(sql)
+        ps.setLong(1, System.currentTimeMillis())
+        ps.setString(2, sagaId.value)
+        ps.setString(3, stepName)
+        ps.executeUpdate()
+        ps.close()
+        Right(())
+      catch case e: Throwable => Left(e)
+
   def markCompensated(sagaId: SagaId, stepName: String): Either[Throwable, Unit] =
     synchronized:
       updateEntryStatus(sagaId, stepName, "Compensated")
@@ -131,6 +144,7 @@ class SqliteWalStore(dbPath: String) extends WalStore:
               case "Compensated"        => Right(WalEntry.Status.Compensated)
               case "CompensationFailed" => Right(WalEntry.Status.CompensationFailed)
               case "HumanIntervention"  => Right(WalEntry.Status.HumanIntervention)
+              case "Unknown"            => Right(WalEntry.Status.Unknown)
               case unknown              => Left(Exception(s"Unknown status: $unknown"))
           else Left(Exception(s"Step '$stepName' not found for saga $sagaId"))
         rs.close()
@@ -145,7 +159,7 @@ class SqliteWalStore(dbPath: String) extends WalStore:
         val sql = """
           SELECT step_name, compensation_ref, compensation_args
           FROM   wal_entries
-          WHERE  saga_id = ? AND status = 'CompensationFailed'
+          WHERE  saga_id = ? AND status IN ('CompensationFailed', 'Unknown')
           ORDER  BY created_at DESC
         """
         val ps = conn.prepareStatement(sql)
